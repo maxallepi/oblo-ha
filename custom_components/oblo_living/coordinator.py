@@ -7,7 +7,8 @@ from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity, DataUpdateCoordinator, UpdateFailed,
 )
 
-from .cloud_api import ObloAuthError, ObloCloudApi, ObloCloudError, normalise_devices
+from .cloud_api import (ObloAuthError, ObloCloudApi, ObloCloudError,
+                           ObloRateLimitError, normalise_devices)
 from .const import DOMAIN, SCAN_INTERVAL_S
 
 _LOGGER = logging.getLogger(__name__)
@@ -64,6 +65,13 @@ class ObloDataCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         try:
             return await self._async_fetch()
+        except ObloRateLimitError as err:
+            # Account temporarily blocked: even correct password fails.
+            # Don't re-login (that would hit the same block) and don't retry
+            # immediately -- return cached data and let the scheduled poll
+            # pick it up when the block lifts (~15 min).
+            _LOGGER.warning("cloud account blocked, keeping cached state: %s", err)
+            return self.devices
         except ObloAuthError as err:
             _LOGGER.info("cloud session expired (%s), re-logging in", err)
             try:
@@ -72,6 +80,10 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 # credentials themselves rejected -> HA shows the reauth form
                 _LOGGER.error("cloud re-login rejected: %s", err2)
                 raise ConfigEntryAuthFailed(str(err2)) from err2
+            except ObloRateLimitError as err2:
+                # re-login also hit the block -- don't retry, keep cached
+                _LOGGER.warning("cloud re-login blocked, keeping cached state: %s", err2)
+                return self.devices
             except ObloCloudError as err2:
                 raise UpdateFailed(str(err2)) from err2
         except ObloCloudError as err:

@@ -59,7 +59,8 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.warning("cloud answered unexpectedly: %s", err)
             return "cloud_unavailable" if "HTTP 5" in str(err) else "unexpected_response"
         if isinstance(err, ObloCloudError):
-            # DNS/TLS/refused/timeout/429 - a real network-level failure
+            # DNS/TLS/refused/timeout - a real network-level failure.
+            # (429/000016 never reaches here: ObloRateLimitError is caught above.)
             _LOGGER.warning("cloud unreachable: %s", err)
             return "cannot_connect"
         _LOGGER.exception("unexpected config flow error: %s", err)
