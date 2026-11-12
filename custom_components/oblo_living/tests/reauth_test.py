@@ -112,6 +112,7 @@ class FlowHarness:
     async_step_reauth = ObloConfigFlow.async_step_reauth
     async_step_reauth_confirm = ObloConfigFlow.async_step_reauth_confirm
     _async_login = ObloConfigFlow._async_login
+    _login_error_key = ObloConfigFlow._login_error_key
 
 
 async def run():

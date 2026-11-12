@@ -26,6 +26,7 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self):
         self._entry = None
 
+    # ---------------------------------------------------------------- helpers
     async def _async_login(self, identity: str, secret: str):
         """Log in with PLAINTEXT credentials; return the authenticated api.
 
@@ -38,36 +39,52 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         await api.async_login()
         return api
 
+    def _login_error_key(self, err: Exception) -> str:
+        """Map a cloud exception onto a strings.json error key."""
+        if isinstance(err, ObloAuthError):
+            # wrong password (406/00012), unknown user (409/11020),
+            # forced logout (401/000622), session rejected (403/00003)
+            _LOGGER.info("login rejected: %s", err)
+            return "invalid_auth"
+        if isinstance(err, ObloResponseError):
+            # reached the cloud, but 5xx / unparseable answer
+            _LOGGER.warning("cloud answered unexpectedly: %s", err)
+            return "cloud_unavailable" if "HTTP 5" in str(err) else "unexpected_response"
+        if isinstance(err, ObloCloudError):
+            # DNS/TLS/refused/timeout/429 - a real network-level failure
+            _LOGGER.warning("cloud unreachable: %s", err)
+            return "cannot_connect"
+        _LOGGER.exception("unexpected config flow error: %s", err)
+        return "unknown"
+
+    # ------------------------------------------------------------------- user
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         errors = {}
         if user_input is not None:
-            identity = user_input[CONF_IDENTITY].strip()
-            try:
-                api = await self._async_login(identity, user_input[CONF_SECRET])
-                # success -> create entry with identity + md5(password)
-                # session_id/user_id cached for fast startup
-                return self.async_create_entry(
-                    title=f"OBLO Cloud ({identity})",
-                    data={
-                        CONF_IDENTITY: identity,
-                        CONF_SECRET: md5_hex(user_input[CONF_SECRET]),
-                        CONF_SESSION_ID: api.session_id,
-                        CONF_USER_ID: api.user_id,
-                    },
-                )
-            except ObloAuthError as err:
-                _LOGGER.info("login rejected: %s", err)
-                errors["base"] = "invalid_auth"
-            except ObloResponseError as err:
-                _LOGGER.warning("cloud answered unexpectedly: %s", err)
-                errors["base"] = ("cloud_unavailable" if "HTTP 5" in str(err)
-                                  else "unexpected_response")
-            except ObloCloudError as err:
-                _LOGGER.warning("cloud unreachable: %s", err)
-                errors["base"] = "cannot_connect"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("unexpected config flow error")
-                errors["base"] = "unknown"
+            # Identity: strip autofill whitespace and normalise case. The cloud
+            # treats " me@x.com" as a different (non-existent) account, which
+            # came back as 11020 "user does not exist" - a false negative.
+            identity = str(user_input[CONF_IDENTITY]).strip()
+            # Password is NEVER stripped: leading/trailing spaces can be real.
+            secret = str(user_input[CONF_SECRET])
+            if not identity or not secret:
+                errors["base"] = "missing_credentials"
+            else:
+                try:
+                    api = await self._async_login(identity, secret)
+                    # success -> create entry with identity + md5(password)
+                    # session_id/user_id cached for fast startup
+                    return self.async_create_entry(
+                        title=f"OBLO Cloud ({identity})",
+                        data={
+                            CONF_IDENTITY: identity,
+                            CONF_SECRET: md5_hex(secret),
+                            CONF_SESSION_ID: api.session_id,
+                            CONF_USER_ID: api.user_id,
+                        },
+                    )
+                except Exception as err:  # noqa: BLE001 - mapped below
+                    errors["base"] = self._login_error_key(err)
 
         return self.async_show_form(
             step_id="user", data_schema=_CREDENTIALS, errors=errors)
@@ -88,34 +105,27 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self, user_input: dict[str, Any] | None = None):
         errors = {}
         assert self._entry is not None
-        identity = self._entry.data[CONF_IDENTITY]
+        identity = str(self._entry.data[CONF_IDENTITY]).strip()
 
         if user_input is not None:
-            try:
-                api = await self._async_login(identity, user_input[CONF_SECRET])
-            except ObloAuthError as err:
-                _LOGGER.info("reauth rejected: %s", err)
-                errors["base"] = "invalid_auth"
-            except ObloResponseError as err:
-                _LOGGER.warning("reauth: cloud answered unexpectedly: %s", err)
-                errors["base"] = ("cloud_unavailable" if "HTTP 5" in str(err)
-                                  else "unexpected_response")
-            except ObloCloudError as err:
-                _LOGGER.warning("reauth: cloud unreachable: %s", err)
-                errors["base"] = "cannot_connect"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("reauth: unexpected error")
-                errors["base"] = "unknown"
+            secret = str(user_input[CONF_SECRET])
+            if not secret:
+                errors["base"] = "missing_credentials"
             else:
-                new_data = dict(self._entry.data)
-                new_data.update({
-                    CONF_SECRET: md5_hex(user_input[CONF_SECRET]),
-                    CONF_SESSION_ID: api.session_id,
-                    CONF_USER_ID: api.user_id,
-                })
-                self.hass.config_entries.async_update_entry(
-                    self._entry, data=new_data)
-                return self.async_abort(reason="reauth_successful")
+                try:
+                    api = await self._async_login(identity, secret)
+                except Exception as err:  # noqa: BLE001 - mapped below
+                    errors["base"] = self._login_error_key(err)
+                else:
+                    new_data = dict(self._entry.data)
+                    new_data.update({
+                        CONF_SECRET: md5_hex(secret),
+                        CONF_SESSION_ID: api.session_id,
+                        CONF_USER_ID: api.user_id,
+                    })
+                    self.hass.config_entries.async_update_entry(
+                        self._entry, data=new_data)
+                    return self.async_abort(reason="reauth_successful")
 
         return self.async_show_form(
             step_id="reauth_confirm",
