@@ -91,6 +91,15 @@ class ObloCloudMqtt:
     # Public async API
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _mask(s: str) -> str:
+        """Mask a credential-like string for logging."""
+        if not s:
+            return "<empty>"
+        if len(s) <= 8:
+            return s[0] + "*" * (len(s) - 1)
+        return s[:4] + "..." + s[-4:] + f" (len={len(s)})"
+
     async def async_connect(self) -> None:
         """Open WSS, MQTT CONNECT, subscribe response topic."""
         if self._client is not None:
@@ -259,7 +268,12 @@ class ObloCloudMqtt:
                 _LOGGER.debug("SUB %s", rsp_alt)
             self._conn_error = None
         else:
-            self._conn_error = ObloAuthError(f"MQTT CONNACK {rc}")
+            # CONNACK 5 (Not authorized) means the broker rejected the identity
+            # itself, not the payload `sender` — with a shared literal password
+            # the username IS the credential, so log its shape, not its value.
+            self._conn_error = ObloAuthError(
+                f"MQTT CONNACK {rc} for username {self._mask(self._username)} "
+                f"(serial {self._gateway_serial})")
         self._connected.set()
 
     # alias for tests that invoke the method directly
