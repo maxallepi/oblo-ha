@@ -12,7 +12,7 @@ from .coordinator import ObloDataCoordinator
 from .hub import ObloHub
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = ["binary_sensor", "sensor", "switch"]
+PLATFORMS = ["binary_sensor", "sensor"]  # switch/light need the cloud command API (not yet)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

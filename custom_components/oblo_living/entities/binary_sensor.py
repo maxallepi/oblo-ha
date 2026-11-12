@@ -1,26 +1,54 @@
-"Binary sensor entity for OBLO devices (motion, contact, tamper)."
-from homeassistant.components.binary_sensor import BinarySensorEntity
-from homeassistant.const import STATE_ON, STATE_OFF
+"""Binary sensor entity for OBLO devices (motion, contact, tamper).
+
+Same descriptor-driven pattern as the sensor platform: the value is read from
+coordinator.data on every access, so a 60s cloud poll refreshes the state.
+"""
+from homeassistant.components.binary_sensor import (
+    BinarySensorEntity, BinarySensorDeviceClass,
+)
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 
-class ObloBinarySensor(BinarySensorEntity):
-    """Maps service property to on/off."""
+DEVICE_CLASS = {
+    "motion": BinarySensorDeviceClass.MOTION,
+    "door": BinarySensorDeviceClass.DOOR,
+    "window": BinarySensorDeviceClass.WINDOW,
+    "tamper": BinarySensorDeviceClass.TAMPER,
+    "smoke": BinarySensorDeviceClass.SMOKE,
+}
 
-    def __init__(self, hub, device, service_name, device_class, value_prop):
-        self._hub, self._device = hub, device
-        self._service = service_name
-        self._value_prop = value_prop
-        self._attr_name = f"{device.name} {service_name}"
-        self._attr_unique_id = f"oblo_{device.device_id}_{service_name}"
-        self._attr_device_class = device_class
+TRUE_VALUES = ("1", "true", "yes", "on", "open", "active", "detected")
+
+
+class ObloBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Maps one service property to on/off."""
+
+    def __init__(self, coordinator, ent):
+        super().__init__(coordinator)
+        self._ent = ent
+        self._attr_name = f"{ent['name']} {ent['service']}".strip()
+        self._attr_unique_id = ent["unique_id"]
+        if ent.get("device_class"):
+            self._attr_device_class = DEVICE_CLASS.get(ent["device_class"])
+
+    def _device(self):
+        did = self._ent["device_id"]
+        for dev in (self.coordinator.data or []):
+            if dev.get("id") == did:
+                return dev
+        return None
 
     @property
     def is_on(self):
-        val = self._device.properties.get(self._service, {}).get(self._value_prop)
-        if val is None:
+        dev = self._device()
+        if dev is None:
             return None
-        return str(val).lower() in ("1", "true", "yes", "on")
-
-    async def async_update(self):
-        """Hub pushes updates via listener; no polling needed."""
-        pass
+        for svc in dev.get("services", []):
+            if svc.get("service") != self._ent["service"]:
+                continue
+            props = dict(svc.get("props") or [])
+            val = props.get(self._ent.get("value_prop"))
+            if val is None:
+                return None
+            return str(val).lower() in TRUE_VALUES
+        return None

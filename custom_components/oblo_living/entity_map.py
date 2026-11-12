@@ -68,6 +68,8 @@ def build_entities(devices):
                 "platform": platform,
                 "device_class": dclass,
                 "unit": unit,
+                # prop name the state lives in -- the entity reads this key
+                "value_prop": prop,
                 "state": state,
                 "unique_id": f"oblo_{dev['id']}_{name}",
             })

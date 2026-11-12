@@ -76,11 +76,69 @@ def install():
     util = _mod("homeassistant.util")
     util.dt = MagicMock()
 
-    # wire submodules onto the package so 'from homeassistant import X' works
+    # ----- component-specific submodules -----------------------------------
+    # sensor platform
+    sensor_mod = _mod("homeassistant.components.sensor", package=True)
+
+    class SensorEntity:
+        _attr_name = None
+        _attr_unique_id = None
+        _attr_device_class = None
+        _attr_native_unit_of_measurement = None
+
+        @property
+        def native_value(self):
+            raise NotImplementedError
+
+    class SensorDeviceClass:
+        TEMPERATURE = "temperature"
+        HUMIDITY = "humidity"
+        ILLUMINANCE = "illuminance"
+        BATTERY = "battery"
+        POWER = "power"
+
+    sensor_mod.SensorEntity = SensorEntity
+    sensor_mod.SensorDeviceClass = SensorDeviceClass
+
+    # binary_sensor platform
+    bs_mod = _mod("homeassistant.components.binary_sensor", package=True)
+
+    class BinarySensorEntity:
+        _attr_name = None
+        _attr_unique_id = None
+        _attr_device_class = None
+
+        @property
+        def is_on(self):
+            raise NotImplementedError
+
+    class BinarySensorDeviceClass:
+        MOTION = "motion"
+        DOOR = "door"
+        WINDOW = "window"
+        TAMPER = "tamper"
+        SMOKE = "smoke"
+
+    bs_mod.BinarySensorEntity = BinarySensorEntity
+    bs_mod.BinarySensorDeviceClass = BinarySensorDeviceClass
+
+    # const units
+    const_mod = _mod("homeassistant.const")
+    const_mod.PERCENTAGE = "%"
+    const_mod.UnitOfTemperature = types.SimpleNamespace(CELSIUS="°C")
+    const_mod.UnitOfPower = types.SimpleNamespace(WATT="W")
+    const_mod.LIGHT_LUX = "lx"
+    const_mod.STATE_ON = "on"
+    const_mod.STATE_OFF = "off"
+
+    # wire submodules onto the package
     ha.config_entries = ce
     ha.core = core
     ha.exceptions = exc
     ha.helpers = helpers
-
+    ha.const = const_mod
+    ha.components = _mod("homeassistant.components", package=True)
+    ha.components.sensor = sensor_mod
+    ha.components.binary_sensor = bs_mod
 
 install()
