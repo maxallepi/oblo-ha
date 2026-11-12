@@ -246,6 +246,11 @@ def normalise_devices(gateways):
     def is_gateway(obj):
         if not isinstance(obj, dict):
             return False
+        # Cloud gateway container: type/class == "hg" (home gateway).
+        # The live payload for Andrew's install has NO `devices` key at all,
+        # so this check must come first or the gateway is emitted as a device.
+        if obj.get("type") == "hg" or obj.get("class") == "hg":
+            return True
         devs = obj.get("devices")
         if not isinstance(devs, list):
             return False

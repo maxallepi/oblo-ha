@@ -181,6 +181,29 @@ async def run():
 
     import aiohttp
     async with aiohttp.ClientSession() as sess:
+        # ---- 0. gateway-vs-device detection (live payload shape) -----------
+        # Andrew's real /udm/device/list payload has type=hg, class=hg and
+        # NO `devices` key. Before v0.2.17 that made is_gateway() False and
+        # emitted the gateway as a phantom device.
+        live_gateway = [{
+            "_id": "645cd2167740a3ddc4c010a5", "type": "hg", "class": "hg",
+            "serialNumber": "C83DD4300D5B", "userId": "648ad672ef7b469291198cfb",
+            "name": "Living Room", "model": "doc300",
+        }]
+        check("live gateway (type=hg, no devices) -> 0 devices",
+              len(normalise_devices(live_gateway)) == 0)
+
+        out2 = normalise_devices([{
+            "_id": "g1", "type": "hg", "serialNumber": "SN1",
+            "devices": [{"deviceId": "d1", "name": "Sensor",
+                         "class": "sensor", "services": []}],
+        }])
+        check("gateway with embedded device -> 1 device",
+              len(out2) == 1 and out2[0]["id"] == "d1")
+
+        check("non-gateway object still passes through",
+              len(normalise_devices([{"deviceId": "d9", "name": "Plug"}])) == 1)
+
         # ---- 1. happy path login ------------------------------------------
         api = ObloCloudApi(sess, IDENTITY, PASSWORD, host=base)
         user = await api.async_login()

@@ -22,7 +22,9 @@ sys.path.insert(0, ROOT)
 
 import ha_stub  # noqa: E402,F401
 
-from custom_components.oblo_living.coordinator import ObloDataCoordinator  # noqa: E402
+from custom_components.oblo_living.coordinator import (  # noqa: E402
+    ObloDataCoordinator, diag_shape,
+)
 from custom_components.oblo_living.cloud_api import (  # noqa: E402
     ObloAuthError, ObloCloudError, ObloRateLimitError, normalise_devices,
 )
@@ -33,6 +35,29 @@ CHECKS = []
 def check(label, cond, detail=""):
     CHECKS.append((label, bool(cond), detail))
     print(f"{'PASS' if cond else 'FAIL'}  {label}" + (f"  <- {detail}" if detail and not cond else ""))
+
+
+# --- diag_shape redaction -------------------------------------------------
+def test_diag_shape():
+    # v0.2.13 raw dump printed secureId + hash. v0.2.17 must not.
+    gw = [{"type": "hg", "serialNumber": "SN1", "secureId": "SEED", "hash": "H", "userId": "U"}]
+    out = diag_shape(gw)
+    check("count present", out["count"] == 1)
+    check("keys listed", "secureId" in out["keys"] and "hash" in out["keys"])
+    check("no VALUES of secureId/hash", "SEED" not in str(out) and "H" not in str(out))
+    check("type present", out["type"] == "hg")
+    check("has_devices bool", out["has_devices"] == False)
+    check("device_count 0", out["device_count"] == 0)
+
+    # non-gateway object passes through with keys
+    dev = [{"deviceId": "d1", "name": "Sensor", "class": "sensor", "services": []}]
+    out2 = diag_shape(dev)
+    check("dev count 1", out2["count"] == 1)
+    check("dev keys", "deviceId" in out2["keys"])
+
+    # empty list
+    check("empty list -> count 0", diag_shape([])["count"] == 0)
+    check("non-dict item skipped", diag_shape(["x", {"a": 1}])["count"] == 1)
 
 
 class FakeApi:
@@ -67,6 +92,8 @@ class FakeApi:
 
 
 async def main():
+    test_diag_shape()
+
     # --- normal cycle populates the cache -------------------------------
     api = FakeApi()
     coord = ObloDataCoordinator(None, api)

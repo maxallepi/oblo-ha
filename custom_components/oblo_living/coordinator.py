@@ -12,6 +12,27 @@ from .cloud_api import (ObloAuthError, ObloCloudApi, ObloCloudError,
 from .const import DOMAIN, SCAN_INTERVAL_S
 
 
+def diag_shape(payload):
+    """Structural summary of a cloud payload: keys and type ONLY, never values.
+
+    Exists because the v0.2.13 raw dump wrote `secureId` (the AES key seed for
+    local gateway MQTT credentials) and `hash` into the HA log in plaintext.
+    Any field whose value could be a credential is simply not rendered here.
+    """
+    items = payload if isinstance(payload, list) else [payload]
+    items = [i for i in items if isinstance(i, dict)]
+    if not items:
+        return {"count": 0}
+    first = items[0]
+    return {
+        "count": len(items),
+        "keys": sorted(first.keys()),
+        "type": first.get("type"),
+        "has_devices": isinstance(first.get("devices"), list),
+        "device_count": len(first.get("devices") or []),
+    }
+
+
 def normalise_ohm_objects(ohm_objects):
     """Convert OHM object_list from cloud MQTT to internal device shape.
 
@@ -128,35 +149,30 @@ class ObloDataCoordinator(DataUpdateCoordinator):
 
         self.devices = merge_devices(rest_devices, ohm_devices)
 
-        # --- DIAGNOSTIC DUMP (v0.2.13) ---
-        # One-time WARNING-level dump of RAW payloads from both cloud endpoints
-        # so we can see the exact structure and find where child devices live.
+        # --- DIAGNOSTIC (v0.2.17) ---
+        # The v0.2.13 raw dump printed `secureId` (the AES key seed for local
+        # gateway MQTT credentials) and `hash` straight into the HA log. It had
+        # done its job, so it is gone. What remains is a redacted structural
+        # summary: field NAMES only, no credential material, no device values.
         if not getattr(self, "_diag_dumped", False):
             self._diag_dumped = True
             try:
-                import json
-                _LOGGER.warning("DIAG RAW GATEWAYS: %s",
-                                json.dumps(gateways, default=str)[:3000])
-                _LOGGER.warning("DIAG RAW DETAILS: %s",
-                                json.dumps(details, default=str)[:3000])
+                _LOGGER.warning("DIAG gateways=%s details=%s",
+                                diag_shape(gateways), diag_shape(details))
 
                 from .entity_map import build_entities
                 entities = build_entities(self.devices)
                 svc_names = set()
-                for d in self.devices[:3]:
-                    svcs = [s["service"] for s in d.get("services", [])]
-                    svc_names.update(svcs)
-                    _LOGGER.warning(
-                        "DIAG device id=%s name=%r class=%r services=%s",
-                        d.get("id"), d.get("name"), d.get("class"), svcs)
+                for d in self.devices:
+                    svc_names.update(s["service"] for s in d.get("services", []))
                 _LOGGER.warning(
-                    "DIAG SUMMARY: devices=%d total_services=%d mapped=%d entities=%d",
+                    "DIAG SUMMARY: devices=%d total_services=%d mapped=%d entities=%d "
+                    "services=%s",
                     len(self.devices),
                     sum(len(d.get("services", [])) for d in self.devices),
-                    len(svc_names),
-                    len(entities))
+                    len(svc_names), len(entities), sorted(svc_names)[:30])
             except Exception as e:  # never let diagnostics break the poll
-                _LOGGER.warning("DIAG dump failed: %s", e)
+                _LOGGER.warning("DIAG summary failed: %s", e)
 
         return self.devices
 
