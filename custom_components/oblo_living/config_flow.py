@@ -10,7 +10,7 @@ from .const import (
     DOMAIN, CONF_IDENTITY, CONF_SECRET,
     CONF_SESSION_ID, CONF_USER_ID,
 )
-from .cloud_api import ObloCloudApi, ObloAuthError, ObloCloudError, md5_hex
+from .cloud_api import ObloCloudApi, ObloAuthError, ObloCloudError, ObloResponseError, md5_hex
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,10 +55,15 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_USER_ID: api.user_id,
                     },
                 )
-            except ObloAuthError:
+            except ObloAuthError as err:
+                _LOGGER.info("login rejected: %s", err)
                 errors["base"] = "invalid_auth"
+            except ObloResponseError as err:
+                _LOGGER.warning("cloud answered unexpectedly: %s", err)
+                errors["base"] = ("cloud_unavailable" if "HTTP 5" in str(err)
+                                  else "unexpected_response")
             except ObloCloudError as err:
-                _LOGGER.warning("cloud validation failed: %s", err)
+                _LOGGER.warning("cloud unreachable: %s", err)
                 errors["base"] = "cannot_connect"
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("unexpected config flow error")
@@ -88,8 +93,13 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 api = await self._async_login(identity, user_input[CONF_SECRET])
-            except ObloAuthError:
+            except ObloAuthError as err:
+                _LOGGER.info("reauth rejected: %s", err)
                 errors["base"] = "invalid_auth"
+            except ObloResponseError as err:
+                _LOGGER.warning("reauth: cloud answered unexpectedly: %s", err)
+                errors["base"] = ("cloud_unavailable" if "HTTP 5" in str(err)
+                                  else "unexpected_response")
             except ObloCloudError as err:
                 _LOGGER.warning("reauth: cloud unreachable: %s", err)
                 errors["base"] = "cannot_connect"

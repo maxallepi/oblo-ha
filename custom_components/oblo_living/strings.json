@@ -18,8 +18,10 @@
       }
     },
     "error": {
-      "invalid_auth": "Cloud rejected these credentials (user does not exist or wrong password).",
+      "invalid_auth": "Cloud rejected these credentials (user does not exist or wrong password). Check the HA log for the exact error code.",
       "cannot_connect": "Could not reach cloud.oblo.rs (network error or rate limited).",
+      "cloud_unavailable": "Reached cloud.oblo.rs but it answered with a server error (HTTP 5xx). The cloud service may be down.",
+      "unexpected_response": "Login answered with an unexpected response. Check the HA log for details.",
       "unknown": "Unexpected error during login."
     },
     "abort": {

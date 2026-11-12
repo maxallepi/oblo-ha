@@ -25,6 +25,7 @@ break a naive client:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 
@@ -40,7 +41,20 @@ GATEWAY_INFO_PATH = "/udm/device/hg/info/list"
 
 ERR_OK = "00000"
 ERR_USER_NOT_FOUND = "11020"
+ERR_BAD_CREDENTIALS = "00012"
 ERR_FORCED_LOGOUT = "000622"
+ERR_SESSION_REJECTED = "00003"
+
+# Codes that mean "the credentials/session are the problem", not the network.
+# The cloud answers a wrong password with HTTP 406 + 00012, and an unknown
+# identity with HTTP 409 + 11020 -- both are auth failures and must surface as
+# invalid_auth, never as cannot_connect.
+AUTH_ERROR_CODES = {
+    ERR_USER_NOT_FOUND, ERR_BAD_CREDENTIALS, ERR_FORCED_LOGOUT,
+    ERR_SESSION_REJECTED, "11021", "881792",
+}
+# HTTP statuses the cloud uses for auth problems (406 = invalid credentials)
+AUTH_HTTP_STATUSES = (401, 403, 406, 409)
 
 
 def md5_hex(text: str) -> str:
@@ -54,6 +68,10 @@ class ObloCloudError(Exception):
 
 class ObloAuthError(ObloCloudError):
     """Credentials rejected or session expired."""
+
+
+class ObloResponseError(ObloCloudError):
+    """Cloud responded but body/header shape was unexpected (5xx, parse fail, missing fields)."""
 
 
 def _first_error(data):
@@ -115,7 +133,8 @@ class ObloCloudApi:
         self.username = blob.get("username")
         self.groups = blob.get("groups") or []
         if not self.session_id:
-            raise ObloCloudError(
+            _LOGGER.error("login 200 but no session id; body keys=%s", sorted(blob))
+            raise ObloResponseError(
                 "login succeeded but no sessionid header/body id in response")
         _LOGGER.debug("cloud login ok user_id=%s groups=%s",
                       self.user_id, self.groups)
@@ -159,11 +178,18 @@ class ObloCloudApi:
                 code, message = _first_error(data)
                 if resp.status == 429:
                     raise ObloCloudError("rate limited by cloud (429) - wait and retry")
-                if code == ERR_USER_NOT_FOUND:
-                    raise ObloAuthError("user does not exist")
-                if resp.status in (401, 403) or code == ERR_FORCED_LOGOUT:
-                    raise ObloAuthError(f"session rejected ({code or resp.status})")
+                if code in AUTH_ERROR_CODES or resp.status in AUTH_HTTP_STATUSES:
+                    _LOGGER.info("cloud auth failure: HTTP %s code=%s message=%s",
+                                 resp.status, code, message)
+                    raise ObloAuthError(
+                        f"{message or 'credentials rejected'} ({code or resp.status})")
+                if resp.status >= 500:
+                    _LOGGER.warning("cloud server error: status=%s code=%s body=%s",
+                                    resp.status, code, str(data)[:200])
+                    raise ObloResponseError(f"HTTP {resp.status}: {message or code}")
                 if resp.status >= 400:
+                    _LOGGER.warning("cloud HTTP error: status=%s code=%s body=%s",
+                                    resp.status, code, str(data)[:200])
                     raise ObloCloudError(f"HTTP {resp.status}: {message or code}")
                 if code not in (None, ERR_OK):
                     raise ObloCloudError(f"cloud error {code}: {message}")
@@ -171,6 +197,8 @@ class ObloCloudApi:
                 return data
         except aiohttp.ClientError as err:
             raise ObloCloudError(f"connection to cloud failed: {err}") from err
+        except asyncio.TimeoutError as err:
+            raise ObloCloudError("connection to cloud timed out") from err
 
 
 def normalise_devices(gateways):
