@@ -5,7 +5,9 @@ proves the client speaks the same protocol:
 
   * POST /auth/login  -> session id in the **sessionid response header**,
                          body = {"user": {...}}
-  * secret must be md5(password), identity lower-cased
+  * secret must be the PLAINTEXT password, identity lower-cased
+    (v0.2.10: the cloud hashes server-side -- pre-hashing produced 00012
+     even for correct credentials; md5 belongs to the LOCAL gateway only)
   * authenticated calls must carry `sessionId: <header value>`
 
 Run: python3 tests/cloud_mock_test.py
@@ -46,7 +48,7 @@ from oblo_living.coordinator import merge_devices  # noqa: E402
 
 IDENTITY = "  Andrew@Example.COM "
 PASSWORD = "s3cret-pw"
-EXPECTED_SECRET = hashlib.md5(PASSWORD.encode()).hexdigest()
+EXPECTED_SECRET = PASSWORD          # plaintext on the wire (server hashes)
 SESSION = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
 
 SEEN = {}
@@ -189,9 +191,12 @@ async def run():
         check("identity lower-cased + stripped",
               SEEN["login_body"]["identity"] == "andrew@example.com",
               SEEN["login_body"]["identity"])
-        check("secret is md5(password)",
+        check("secret is PLAINTEXT password",
               SEEN["login_body"]["secret"] == EXPECTED_SECRET,
               SEEN["login_body"]["secret"])
+        check("secret is NOT md5(password)",
+              SEEN["login_body"]["secret"] != hashlib.md5(
+                  PASSWORD.encode()).hexdigest(), "md5 sent by mistake")
         check("privacy/terms flags sent",
               SEEN["login_body"]["isPrivacyPolicyAccepted"] is True
               and SEEN["login_body"]["areTermsOfServiceAccepted"] is True)

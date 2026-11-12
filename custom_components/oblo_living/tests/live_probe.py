@@ -38,10 +38,16 @@ def md5_hex(text: str) -> str:
     return hashlib.md5(text.encode()).hexdigest()
 
 
-async def probe(identity: str, secret: str, verbose: bool, preset_hash: bool = False) -> int:
+async def probe(identity: str, secret: str, verbose: bool, md5: bool = False) -> int:
+    """POST /auth/login exactly like the SPA does.
+
+    The SPA sends the password VERBATIM (`secret: e.user.secret`); the cloud
+    hashes server-side. `md5=True` reproduces the old (broken) behaviour so the
+    two hypotheses can be compared against the live server without DevTools.
+    """
     body = {
         "identity": identity.strip().lower(),
-        "secret": secret if preset_hash else md5_hex(secret),
+        "secret": md5_hex(secret) if md5 else secret,
         "externalLogin": False,
         "isPrivacyPolicyAccepted": True,
         "areTermsOfServiceAccepted": True,
@@ -117,30 +123,32 @@ async def probe(identity: str, secret: str, verbose: bool, preset_hash: bool = F
 def main() -> int:
     ap = argparse.ArgumentParser(description="Live probe cloud.oblo.rs login")
     ap.add_argument("--identity", required=True, help="OBLO cloud email/username")
-    ap.add_argument("--password", help="Plaintext password to test")
-    ap.add_argument("--secret-hash", help="Pre-computed md5(secret) to replay (avoids plaintext entry)")
+    ap.add_argument("--password", help="Plaintext password to test (sent as-is, like the SPA)")
+    ap.add_argument("--secret-raw", "--secret-hash", dest="secret_raw",
+                    help="Replay the exact `secret` value seen in DevTools, verbatim "
+                         "(no validation, no hashing)")
+    ap.add_argument("--md5", action="store_true",
+                    help="Send md5(password) instead of the plaintext -- reproduces the "
+                         "v0.2.0-0.2.9 behaviour to prove/disprove the pre-hash hypothesis")
     ap.add_argument("--wrong-password", action="store_true",
                     help="Use a deliberately wrong password (tests 406/00012)")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
-    if args.secret_hash:
-        # Already-hashed value straight from DevTools: send as-is, never re-hash.
-        secret = args.secret_hash.strip().lower()
-        if len(secret) != 32 or any(c not in "0123456789abcdef" for c in secret):
-            ap.error("--secret-hash must be 32 lowercase hex chars (md5)")
-            return 3
-        return asyncio.run(probe(args.identity, secret, args.verbose, preset_hash=True))
+    if args.secret_raw is not None:
+        # Whatever DevTools shows goes on the wire untouched.
+        return asyncio.run(probe(args.identity, args.secret_raw, args.verbose,
+                                 md5=args.md5))
 
     if args.wrong_password:
         secret = "definitely-not-the-right-password-123"
     elif args.password is not None:
         secret = args.password
     else:
-        ap.error("one of --password, --secret-hash or --wrong-password is required")
+        ap.error("one of --password, --secret-raw or --wrong-password is required")
         return 3
 
-    return asyncio.run(probe(args.identity, secret, args.verbose))
+    return asyncio.run(probe(args.identity, secret, args.verbose, md5=args.md5))
 
 
 if __name__ == "__main__":

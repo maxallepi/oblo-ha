@@ -37,7 +37,9 @@ sys.modules[PKG] = pkg
 
 IDENTITY = "andrew@example.com"
 PASSWORD = "s3cret-pw"
-STORED_SECRET = hashlib.md5(PASSWORD.encode()).hexdigest()
+# v2 entries store the PLAINTEXT password: the cloud hashes server-side, so a
+# stored md5 cannot be replayed (it would be hashed a second time -> 00012).
+STORED_SECRET = PASSWORD
 SESSION_V1 = "SES-OLD-1111"
 SESSION_V2 = "SES-NEW-2222"
 SEEN = {}
@@ -67,14 +69,19 @@ async def handle_expired_session(request):
 
 # ---- harness: real flow methods on a plain object (no HA ConfigFlow) --------
 class FakeEntry:
-    def __init__(self):
+    def __init__(self, version=2):
         self.entry_id = "e-1"
+        self.version = version
+        self.reauth_started = False
         self.data = {
             "identity": IDENTITY,
-            "secret": STORED_SECRET,      # only the md5 -- no plaintext anywhere
+            "secret": STORED_SECRET,      # v2: plaintext password
             "session_id": SESSION_V1,
             "user_id": "user-42",
         }
+
+    def async_start_reauth(self, hass):
+        self.reauth_started = True
 
 
 class FakeConfigEntries:
@@ -84,8 +91,11 @@ class FakeConfigEntries:
     def async_get_entry(self, eid):
         return self.entry if eid == self.entry.entry_id else None
 
-    def async_update_entry(self, entry, data=None):
-        entry.data = data
+    def async_update_entry(self, entry, data=None, **kw):
+        if data is not None:
+            entry.data = data
+        for attr, value in kw.items():
+            setattr(entry, attr, value)
 
 
 class FakeHass:
@@ -146,8 +156,8 @@ async def run():
     SESS = aiohttp.ClientSession()
     cf.async_get_clientsession = lambda hass: SESS
     real_api = cf.ObloCloudApi
-    cf.ObloCloudApi = lambda session, identity, secret, secret_hashed=False: \
-        real_api(session, identity, secret, host=base, secret_hashed=secret_hashed)
+    cf.ObloCloudApi = lambda session, identity, secret: \
+        real_api(session, identity, secret, host=base)
 
     entry = FakeEntry()
     hass = FakeHass(entry)
@@ -167,8 +177,8 @@ async def run():
     kind, kw = result
     check("correct password -> reauth_successful",
           kind == "abort" and kw["reason"] == "reauth_successful", result)
-    check("stored secret rotated to fresh md5",
-          entry.data["secret"] == STORED_SECRET, entry.data["secret"])
+    check("stored secret is the plaintext password (v2)",
+          entry.data["secret"] == PASSWORD, entry.data["secret"])
     check("session id updated on entry",
           entry.data["session_id"] == SESSION_V2, entry.data["session_id"])
     check("identity unchanged", entry.data["identity"] == IDENTITY)
@@ -181,17 +191,26 @@ async def run():
           kind == "form" and kw["errors"]["base"] == "invalid_auth", result)
     check("failed reauth does not touch entry", entry.data == before)
 
-    # 4. replaying the stored md5 is NOT a credential
-    result = await flow.async_step_reauth_confirm({"secret": STORED_SECRET})
+    # 4. the stored value goes to the wire VERBATIM (plaintext, not re-hashed)
+    result = await flow.async_step_reauth_confirm({"secret": PASSWORD})
     kind, kw = result
-    check("stored hash cannot be replayed",
-          kind == "form" and kw["errors"]["base"] == "invalid_auth", result)
-    # the flow hashed the input again, so the raw stored hash never hit the wire
-    check("raw stored hash never sent on the wire",
-          STORED_SECRET not in SEEN["attempts"][-1:],
-          SEEN["attempts"][-1:])
-    check("only the real password was ever accepted", SEEN.get("accepted") == 1,
+    check("stored plaintext replays successfully (re-login path)",
+          kind == "abort" and kw["reason"] == "reauth_successful", result)
+    check("plaintext password hit the wire as-is",
+          SEEN["attempts"][-1] == PASSWORD, SEEN["attempts"][-1])
+    check("accepted attempts counted", SEEN.get("accepted") == 2,
           SEEN.get("accepted"))
+
+    # 4b. v1 entry (stored md5) -> migrated to v2 + reauth requested
+    old = FakeEntry(version=1)
+    old.data["secret"] = hashlib.md5(PASSWORD.encode()).hexdigest()
+    old_hass = FakeHass(old)
+    from oblo_living.config_flow import async_migrate_entry
+    migrated = await async_migrate_entry(old_hass, old)
+    check("v1 entry migrates", migrated is True, migrated)
+    check("entry version bumped to 2", old.version == 2, old.version)
+    check("v1 entry sends user to reauth", old.reauth_started is True,
+          old.reauth_started)
 
     # 5. coordinator escalates a failed re-login to HA's reauth prompt
     from oblo_living.cloud_api import ObloCloudApi, ObloAuthError

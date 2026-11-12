@@ -15,9 +15,15 @@ logout), "881792".
 Two behaviours copied from the SPA (cloud.oblo.rs/app.js), both of which
 break a naive client:
 
-1. `LoginController.login` sends `md5(password)` as `secret`, not the
-   plaintext -- `var n = createHash(user.secret||""); auth.login(identity, n)`.
-   The identity is lower-cased first.
+1. `LoginController.login` sends the password as **plaintext** in the
+   request body -- `r.login(identity.toLowerCase(), e.user.secret)` and
+   `AuthService.login` posts `{identity, secret, ...}` with NO hashing
+   (verified 2026-11-12 against the live app.js; `md5.createHash` appears
+   only in GatewayAuthService, i.e. the LOCAL gateway login, never the
+   cloud path). The cloud hashes server-side, so a client that pre-hashes
+   gets md5(md5(pw)) compared against md5(pw) -> 00012 "Invalid
+   credentials" even with a correct password. That was v0.2.0-0.2.9's
+   bug; the secret must go on the wire exactly as the user typed it.
 2. The session id does NOT come back in the body. It arrives in the
    **`sessionid` response header**:
    `createSession(e.data.user.username, r, e.data.user, e.headers("sessionid"))`.
@@ -63,7 +69,12 @@ AUTH_HTTP_STATUSES = (401, 403, 406, 409)
 
 
 def md5_hex(text: str) -> str:
-    """Lower-case hex MD5 of text -- exactly what the SPA sends as secret."""
+    """Lower-case hex MD5 of text.
+
+    LOCAL GATEWAY LOGIN ONLY (`GatewayAuthService.login` in the SPA hashes the
+    password this way against the gateway's own HTTP API). The CLOUD login must
+    send the plaintext password -- see the module docstring.
+    """
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
@@ -96,11 +107,16 @@ class ObloCloudApi:
     """Minimal cloud client: login, list gateways, fetch gateway device info."""
 
     def __init__(self, session: aiohttp.ClientSession, identity: str, secret: str,
-                 host: str | None = None, secret_hashed: bool = False):
+                 host: str | None = None):
+        """`secret` is the PLAINTEXT password -- the cloud hashes server-side.
+
+        (The old `secret_hashed` kwarg is gone: v0.2.0-0.2.9 pre-hashed the
+        password with md5, which the cloud never wanted -- it produced 00012
+        even for correct credentials.)
+        """
         self._session = session
         self._identity = identity
         self._secret = secret
-        self._secret_hashed = secret_hashed
         self._host: str = host or CLOUD_HOST
         self.last_headers: dict[str, str] = {}
         self.session_id = None
@@ -112,13 +128,13 @@ class ObloCloudApi:
     async def async_login(self):
         """POST /auth/login; populates session_id/user_id/username/groups.
 
-        Matches the SPA exactly: identity lower-cased, secret = md5(password),
-        session id read from the `sessionid` response header, user object
-        from body["user"].
+        Matches the SPA exactly: identity lower-cased, secret sent as PLAINTEXT
+        (the cloud hashes server-side). The session id is read from the
+        `sessionid` response header; the user object from body["user"].
         """
         body = {
             "identity": self._identity.strip().lower(),
-            "secret": self._secret if self._secret_hashed else md5_hex(self._secret),
+            "secret": self._secret,          # PLAINTEXT -- do NOT md5
             "externalLogin": False,
             "isPrivacyPolicyAccepted": True,
             "areTermsOfServiceAccepted": True,

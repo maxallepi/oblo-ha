@@ -7,6 +7,7 @@ an account problem when it's a form-fill problem.
 Guarantees tested here:
 - identity is stripped + lower-cased on the wire, everywhere it is sent
 - the PASSWORD is never stripped (a real password can contain spaces)
+- the PASSWORD is sent AS PLAINTEXT to the cloud (no client-side md5)
 - submitting a blank identity/secret is blocked client-side (missing_credentials)
 - blank reauth password is blocked too
 
@@ -66,25 +67,28 @@ async def main():
         # 1. identity with autofill whitespace + mixed case, password unchanged
         identity = "  Andrew.Theo@Gmail.COM \n"
         secret = "sup3r-Secret! "
-        api = ObloCloudApi(session, identity, md5_hex(secret), host=host,
-                           secret_hashed=True)
+        # PLAINTEXT secret on the wire now; md5 is NOT sent
+        api = ObloCloudApi(session, identity, secret, host=host)
         await api.async_login()
         wire = captured["body"]
         check("identity stripped+lowered on wire",
               wire["identity"] == "andrew.theo@gmail.com", wire["identity"])
-        check("secret md5 of EXACT input (no strip)",
-              wire["secret"] == md5_hex(secret), wire["secret"])
-        check("password with trailing space NOT altered",
-              wire["secret"] != md5_hex(secret.rstrip()), "password was stripped")
+        check("secret is PLAINTEXT (not md5) on wire",
+              wire["secret"] == secret, wire["secret"])
+        check("password with trailing space NOT stripped",
+              wire["secret"] == secret, "password was stripped")
+        check("secret is NOT md5 on wire",
+              wire["secret"] != md5_hex(secret), "md5 sent by mistake")
 
         # 2. constructor-level identity: same normalisation without config flow
         captured.clear()
-        api2 = ObloCloudApi(session, "\tandrew.theo@gmail.com ", md5_hex("p"),
-                            host=host, secret_hashed=True)
+        api2 = ObloCloudApi(session, "\tandrew.theo@gmail.com ", "p", host=host)
         await api2.async_login()
         check("constructor identity also normalised",
               captured["body"]["identity"] == "andrew.theo@gmail.com",
               captured["body"]["identity"])
+        check("constructor secret also plaintext",
+              captured["body"]["secret"] == "p", captured["body"]["secret"])
 
         # 3. session id still captured after a clean login
         check("session id from header", api.session_id == "sess-abc", api.session_id)

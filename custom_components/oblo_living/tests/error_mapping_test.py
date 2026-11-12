@@ -93,8 +93,7 @@ async def main():
 
     async def attempt(key):
         async with aiohttp.ClientSession() as session:
-            api = ObloCloudApi(session, "user@example.com", "0" * 32,
-                               host=host, secret_hashed=True)
+            api = ObloCloudApi(session, "user@example.com", "pw", host=host)
             try:
                 await api._request("POST", f"/{key}", json={}, auth=False)
                 return None, None
@@ -133,8 +132,7 @@ async def main():
 
     # genuine transport failure: connection refused = cannot_connect
     async with aiohttp.ClientSession() as session:
-        api = ObloCloudApi(session, "u", "0" * 32, host="http://127.0.0.1:1",
-                           secret_hashed=True)
+        api = ObloCloudApi(session, "u", "pw", host="http://127.0.0.1:1")
         try:
             await api.async_login()
             check("connection refused -> ObloCloudError", False, "no exception")

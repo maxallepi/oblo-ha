@@ -12,7 +12,7 @@ from .const import (
 )
 from .cloud_api import (
     ObloCloudApi, ObloAuthError, ObloCloudError, ObloRateLimitError,
-    ObloResponseError, md5_hex,
+    ObloResponseError,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,7 +24,9 @@ _CREDENTIALS = vol.Schema({
 
 
 class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    VERSION = 1
+    # v2: stores the PLAINTEXT password. v1 stored md5(password), which the
+    # cloud rejects (it hashes server-side) -- see async_migrate_entry below.
+    VERSION = 2
 
     def __init__(self):
         self._entry = None
@@ -33,12 +35,13 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _async_login(self, identity: str, secret: str):
         """Log in with PLAINTEXT credentials; return the authenticated api.
 
-        The cloud wants md5(password) on the wire, and that hash is the only
-        thing we persist. A stored hash can therefore never be replayed as a
-        credential: every login path takes plaintext from the user.
+        The cloud expects the password verbatim in the POST body and hashes it
+        server-side, so the plaintext is both what goes on the wire and what we
+        persist (a stored hash cannot be replayed -- the server would hash it
+        again and answer 00012).
         """
         session = async_get_clientsession(self.hass)
-        api = ObloCloudApi(session, identity, md5_hex(secret), secret_hashed=True)
+        api = ObloCloudApi(session, identity, secret)
         await api.async_login()
         return api
 
@@ -81,13 +84,13 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 try:
                     api = await self._async_login(identity, secret)
-                    # success -> create entry with identity + md5(password)
+                    # success -> create entry with identity + PLAINTEXT password
                     # session_id/user_id cached for fast startup
                     return self.async_create_entry(
                         title=f"OBLO Cloud ({identity})",
                         data={
                             CONF_IDENTITY: identity,
-                            CONF_SECRET: md5_hex(secret),
+                            CONF_SECRET: secret,
                             CONF_SESSION_ID: api.session_id,
                             CONF_USER_ID: api.user_id,
                         },
@@ -102,8 +105,9 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_reauth(self, entry_data: Mapping[str, Any]):
         """Entry points here when HA decides the credentials need renewing.
 
-        Only the md5 of the old password is stored, so nothing here may reuse
-        it -- the user is prompted for the plaintext password again.
+        v1 entries stored only md5(password); v2 stores the plaintext. Either
+        way the user is prompted for the password again, which is also the
+        correct recovery path for a v1 entry (a hash is not recoverable).
         """
         self._entry = self.hass.config_entries.async_get_entry(
             self.context["entry_id"])
@@ -128,7 +132,7 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else:
                     new_data = dict(self._entry.data)
                     new_data.update({
-                        CONF_SECRET: md5_hex(secret),
+                        CONF_SECRET: secret,
                         CONF_SESSION_ID: api.session_id,
                         CONF_USER_ID: api.user_id,
                     })
@@ -142,3 +146,27 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={"identity": identity},
         )
+
+
+async def async_migrate_entry(hass, config_entry) -> bool:
+    """Migrate a v1 entry (stored md5(password)) to v2 (plaintext password).
+
+    The md5 hash cannot be turned back into the password, and the cloud would
+    hash it a second time, so the only honest migration is to mark the entry
+    v2 and send the user through reauth once to re-enter the password.
+    """
+    if config_entry.version > 2:
+        return False           # written by a newer version -- leave it alone
+    if config_entry.version == 1:
+        _LOGGER.info("migrating OBLO entry %s from v1 to v2 (reauth required)",
+                     config_entry.entry_id)
+        hass.config_entries.async_update_entry(config_entry, version=2,
+                                               minor_version=1)
+        entry = hass.config_entries.async_get_entry(config_entry.entry_id)
+        if entry is not None and hasattr(entry, "async_start_reauth"):
+            entry.async_start_reauth(hass)
+        else:
+            _LOGGER.warning(
+                "could not start reauth for %s; remove and re-add the "
+                "integration", config_entry.entry_id)
+    return True

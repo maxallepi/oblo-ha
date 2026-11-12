@@ -1,6 +1,5 @@
 """OBLO Living integration setup."""
 import logging
-import re
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -17,14 +16,12 @@ PLATFORMS = ["binary_sensor", "sensor"]  # switch/light need the cloud command A
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up OBLO Living from a config entry (cloud mode)."""
-    # build cloud API from stored credentials. CONF_SECRET holds md5(password)
-    # (32 hex chars) for entries created by the current config flow; legacy
-    # plaintext entries are detected and hashed on the fly.
+    # build cloud API from stored credentials. CONF_SECRET holds the PLAINTEXT
+    # password (v2 entries). v1 entries (stored md5) are migrated via
+    # async_migrate_entry and forced to reauth, so only plaintext reaches here.
     session = async_get_clientsession(hass)
     secret = entry.data[CONF_SECRET]
-    api = ObloCloudApi(
-        session, entry.data[CONF_IDENTITY], secret,
-        secret_hashed=bool(re.fullmatch(r"[0-9a-f]{32}", secret or "")))
+    api = ObloCloudApi(session, entry.data[CONF_IDENTITY], secret)
 
     # restore cached session if present (avoids one login round-trip);
     # the coordinator re-authenticates itself on the first auth failure
