@@ -11,9 +11,21 @@ Verified live against https://cloud.oblo.rs:443:
 Response envelope is a JSON array; success uses errorCode "00000", errors
 carry errorCode/httpCode/message. Special codes handled: "000622" (forced
 logout), "881792".
+
+Two behaviours copied from the SPA (cloud.oblo.rs/app.js), both of which
+break a naive client:
+
+1. `LoginController.login` sends `md5(password)` as `secret`, not the
+   plaintext -- `var n = createHash(user.secret||""); auth.login(identity, n)`.
+   The identity is lower-cased first.
+2. The session id does NOT come back in the body. It arrives in the
+   **`sessionid` response header**:
+   `createSession(e.data.user.username, r, e.data.user, e.headers("sessionid"))`.
+   The body holds `{user: {_id, username, groups, devices, ...}}`.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 
 import aiohttp
@@ -29,6 +41,11 @@ GATEWAY_INFO_PATH = "/udm/device/hg/info/list"
 ERR_OK = "00000"
 ERR_USER_NOT_FOUND = "11020"
 ERR_FORCED_LOGOUT = "000622"
+
+
+def md5_hex(text: str) -> str:
+    """Lower-case hex MD5 of text -- exactly what the SPA sends as secret."""
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
 class ObloCloudError(Exception):
@@ -51,10 +68,14 @@ def _first_error(data):
 class ObloCloudApi:
     """Minimal cloud client: login, list gateways, fetch gateway device info."""
 
-    def __init__(self, session: aiohttp.ClientSession, identity: str, secret: str):
+    def __init__(self, session: aiohttp.ClientSession, identity: str, secret: str,
+                 host: str | None = None, secret_hashed: bool = False):
         self._session = session
         self._identity = identity
         self._secret = secret
+        self._secret_hashed = secret_hashed
+        self._host: str = host or CLOUD_HOST
+        self.last_headers: dict[str, str] = {}
         self.session_id = None
         self.user_id = None
         self.username = None
@@ -62,30 +83,40 @@ class ObloCloudApi:
 
     # -- auth ---------------------------------------------------------------
     async def async_login(self):
-        """POST /auth/login; populates session_id/user_id/username/groups."""
+        """POST /auth/login; populates session_id/user_id/username/groups.
+
+        Matches the SPA exactly: identity lower-cased, secret = md5(password),
+        session id read from the `sessionid` response header, user object
+        from body["user"].
+        """
         body = {
-            "identity": self._identity,
-            "secret": self._secret,
+            "identity": self._identity.strip().lower(),
+            "secret": self._secret if self._secret_hashed else md5_hex(self._secret),
             "externalLogin": False,
             "isPrivacyPolicyAccepted": True,
             "areTermsOfServiceAccepted": True,
         }
         data = await self._request("POST", LOGIN_PATH, json=body, auth=False)
-        # Success shape: {sessionId, userId, username, groups, ...} either at
-        # the top level or nested under "session".
+        headers = dict(self.last_headers)
+        # Body shape per SPA: {user: {_id, username, groups, devices, ...}}
         blob = data
-        if isinstance(data, list) and data:
-            blob = data[0]
-        if isinstance(blob, dict) and isinstance(blob.get("session"), dict):
-            blob = blob["session"]
+        if isinstance(data, dict) and isinstance(data.get("user"), dict):
+            blob = data["user"]
+        elif isinstance(data, list) and data and isinstance(data[0], dict):
+            blob = data[0]  # error envelope path (shouldn't reach here)
         if not isinstance(blob, dict):
             raise ObloCloudError(f"unexpected login response: {type(blob).__name__}")
-        self.session_id = blob.get("sessionId") or blob.get("_id")
-        self.user_id = blob.get("userId") or blob.get("userID")
+        # session id: header first, body fallbacks afterwards
+        self.session_id = (headers.get("sessionid")
+                           or blob.get("sessionId")
+                           or blob.get("session")
+                           or blob.get("_id"))
+        self.user_id = blob.get("_id") or blob.get("userId") or blob.get("userID")
         self.username = blob.get("username")
         self.groups = blob.get("groups") or []
         if not self.session_id:
-            raise ObloCloudError("login succeeded but no sessionId in response")
+            raise ObloCloudError(
+                "login succeeded but no sessionid header/body id in response")
         _LOGGER.debug("cloud login ok user_id=%s groups=%s",
                       self.user_id, self.groups)
         return blob
@@ -116,7 +147,7 @@ class ObloCloudApi:
         headers = {"Accept": "application/json"}
         if auth:
             headers["sessionId"] = self.session_id or ""
-        url = f"{CLOUD_HOST}{path}"
+        url = f"{self._host}{path}"
         try:
             async with self._session.request(method, url, headers=headers,
                                              timeout=aiohttp.ClientTimeout(total=30),
@@ -136,6 +167,7 @@ class ObloCloudApi:
                     raise ObloCloudError(f"HTTP {resp.status}: {message or code}")
                 if code not in (None, ERR_OK):
                     raise ObloCloudError(f"cloud error {code}: {message}")
+                self.last_headers = {k.lower(): v for k, v in resp.headers.items()}
                 return data
         except aiohttp.ClientError as err:
             raise ObloCloudError(f"connection to cloud failed: {err}") from err

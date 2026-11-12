@@ -64,3 +64,6 @@ def install():
 
     util = _mod("homeassistant.util")
     util.dt = MagicMock()
+
+
+install()

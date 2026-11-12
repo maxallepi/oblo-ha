@@ -1,6 +1,6 @@
 """OBLO Living integration setup."""
 import logging
-import json
+import re
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -17,23 +17,25 @@ PLATFORMS = ["binary_sensor", "sensor", "switch"]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up OBLO Living from a config entry (cloud mode)."""
-    # build cloud API from stored credentials
+    # build cloud API from stored credentials. CONF_SECRET holds md5(password)
+    # (32 hex chars) for entries created by the current config flow; legacy
+    # plaintext entries are detected and hashed on the fly.
     session = async_get_clientsession(hass)
-    api = ObloCloudApi(session, entry.data[CONF_IDENTITY], entry.data[CONF_SECRET])
+    secret = entry.data[CONF_SECRET]
+    api = ObloCloudApi(
+        session, entry.data[CONF_IDENTITY], secret,
+        secret_hashed=bool(re.fullmatch(r"[0-9a-f]{32}", secret or "")))
 
-    # restore cached session if present (avoids one login round-trip)
+    # restore cached session if present (avoids one login round-trip);
+    # the coordinator re-authenticates itself on the first auth failure
     if entry.data.get("session_id"):
         api.session_id = entry.data["session_id"]
         api.user_id = entry.data["user_id"]
 
-    # first login + device fetch synchronously before platforms load
-    await api.async_login()
-    _LOGGER.info("cloud login ok: user_id=%s session_id=%s", api.user_id, api.session_id)
-
-    # coordinator for periodic polling
+    # coordinator for periodic polling (re-login + fetch happens inside)
     coordinator = ObloDataCoordinator(hass, api)
     await coordinator.async_config_entry_first_refresh()
-    _LOGGER.info("first refresh fetched %d devices", len(coordinator.devices))
+    _LOGGER.info("cloud session=%s devices=%d", api.session_id, len(coordinator.devices))
 
     # build hub from normalised devices
     hub = ObloHub()

@@ -10,7 +10,7 @@ from .const import (
     DOMAIN, CONF_IDENTITY, CONF_SECRET,
     CONF_SESSION_ID, CONF_USER_ID,
 )
-from .cloud_api import ObloCloudApi, ObloAuthError, ObloCloudError
+from .cloud_api import ObloCloudApi, ObloAuthError, ObloCloudError, md5_hex
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,17 +25,18 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             secret = user_input[CONF_SECRET]
 
             session = async_get_clientsession(self.hass)
-            api = ObloCloudApi(session, identity, secret)
+            # server expects md5(password)
+            api = ObloCloudApi(session, identity, md5_hex(secret), secret_hashed=True)
 
             try:
                 await api.async_login()
-                # success -> create entry with identity+secret (cloud credentials)
+                # success -> create entry with identity + md5(password)
                 # session_id/user_id cached for fast startup
                 return self.async_create_entry(
                     title=f"OBLO Cloud ({identity})",
                     data={
                         CONF_IDENTITY: identity,
-                        CONF_SECRET: secret,
+                        CONF_SECRET: md5_hex(secret),
                         CONF_SESSION_ID: api.session_id,
                         CONF_USER_ID: api.user_id,
                     },

@@ -12,6 +12,32 @@ from .const import DOMAIN, SCAN_INTERVAL_S
 _LOGGER = logging.getLogger(__name__)
 
 
+def _weight(device):
+    """How much detail a device record carries: (#services, #props)."""
+    services = device.get("services") or []
+    props = sum(len(s.get("props") or []) for s in services)
+    return (len(services), props)
+
+
+def merge_devices(*device_lists):
+    """De-dup device dicts across payloads, keeping the richest record.
+
+    The gateway list and the hg/info list describe the same devices; the
+    second usually carries more service props, so the merge must compare
+    prop counts -- not just the number of services.
+    """
+    merged = {}
+    for devices in device_lists:
+        for dev in devices or []:
+            did = dev.get("id")
+            if did is None:
+                continue
+            prev = merged.get(did)
+            if prev is None or _weight(dev) > _weight(prev):
+                merged[did] = dev
+    return list(merged.values())
+
+
 class ObloDataCoordinator(DataUpdateCoordinator):
     """Polls the cloud for gateway + device state, re-authenticating on expiry."""
 
@@ -30,14 +56,8 @@ class ObloDataCoordinator(DataUpdateCoordinator):
     async def _async_fetch(self):
         gateways = await self.api.async_list_gateways()
         details = await self.api.async_gateway_devices()
-        devices = normalise_devices(gateways) + normalise_devices(details)
-        # de-dup by id, keep the record carrying the most service data
-        merged = {}
-        for dev in devices:
-            prev = merged.get(dev["id"])
-            if prev is None or len(dev["services"]) > len(prev["services"]):
-                merged[dev["id"]] = dev
-        self.devices = list(merged.values())
+        self.devices = merge_devices(normalise_devices(gateways),
+                                     normalise_devices(details))
         return self.devices
 
     async def _async_update_data(self):
