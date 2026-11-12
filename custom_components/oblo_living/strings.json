@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "OBLO Living Cloud",
+        "description": "Log in with your OBLO Living cloud account. Devices are picked up from the cloud automatically.",
+        "data": {
+          "identity": "Email or username",
+          "secret": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Cloud rejected these credentials (user does not exist or wrong password).",
+      "cannot_connect": "Could not reach cloud.oblo.rs (network error or rate limited).",
+      "unknown": "Unexpected error during login."
+    },
+    "abort": {
+      "already_configured": "This account is already set up."
+    }
+  }
+}

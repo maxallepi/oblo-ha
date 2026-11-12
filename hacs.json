@@ -1,0 +1,11 @@
+{
+  "name": "OBLO Living",
+  "description": "Home Assistant integration for OBLO Living gateway (cloud polling mode)",
+  "maintainer": "@MrMuscles007",
+  "repository": "https://github.com/maxallepi/oblo-ha",
+  "homeassistant": "2024.1",
+  "categories": ["integration"],
+  "version": "0.2.0",
+  "homepage": "https://github.com/maxallepi/oblo-ha",
+  "iot_class": "cloud_polling"
+}

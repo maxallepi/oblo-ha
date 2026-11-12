@@ -1,0 +1,14 @@
+{
+  "domain": "oblo_living",
+  "name": "OBLO Living",
+  "version": "0.2.0",
+  "documentation": "https://github.com/maxallepi/oblo-ha",
+  "codeowners": [
+    "@MrMuscles007"
+  ],
+  "requirements": [
+    "paho-mqtt>=1.6.1"
+  ],
+  "iot_class": "cloud_polling",
+  "config_flow": true
+}
