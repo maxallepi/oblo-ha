@@ -148,25 +148,4 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
 
-async def async_migrate_entry(hass, config_entry) -> bool:
-    """Migrate a v1 entry (stored md5(password)) to v2 (plaintext password).
 
-    The md5 hash cannot be turned back into the password, and the cloud would
-    hash it a second time, so the only honest migration is to mark the entry
-    v2 and send the user through reauth once to re-enter the password.
-    """
-    if config_entry.version > 2:
-        return False           # written by a newer version -- leave it alone
-    if config_entry.version == 1:
-        _LOGGER.info("migrating OBLO entry %s from v1 to v2 (reauth required)",
-                     config_entry.entry_id)
-        hass.config_entries.async_update_entry(config_entry, version=2,
-                                               minor_version=1)
-        entry = hass.config_entries.async_get_entry(config_entry.entry_id)
-        if entry is not None and hasattr(entry, "async_start_reauth"):
-            entry.async_start_reauth(hass)
-        else:
-            _LOGGER.warning(
-                "could not start reauth for %s; remove and re-add the "
-                "integration", config_entry.entry_id)
-    return True

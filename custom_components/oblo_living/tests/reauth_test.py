@@ -31,9 +31,19 @@ import importlib.util
 import types
 
 PKG = "oblo_living"
+# Load the REAL package __init__.py as `oblo_living`: Home Assistant resolves
+# async_migrate_entry on the component module (config_entries.py does
+# `hasattr(component, "async_migrate_entry")`), so an empty placeholder would
+# hide exactly the bug we want this test to catch.
 pkg = types.ModuleType(PKG)
 pkg.__path__ = [COMPONENT]
+pkg.__file__ = os.path.join(COMPONENT, "__init__.py")
 sys.modules[PKG] = pkg
+_init_spec = importlib.util.spec_from_file_location(
+    PKG, pkg.__file__, submodule_search_locations=[COMPONENT])
+_init_mod = importlib.util.module_from_spec(_init_spec)
+sys.modules[PKG] = _init_mod
+_init_spec.loader.exec_module(_init_mod)
 
 IDENTITY = "andrew@example.com"
 PASSWORD = "s3cret-pw"
@@ -205,7 +215,12 @@ async def run():
     old = FakeEntry(version=1)
     old.data["secret"] = hashlib.md5(PASSWORD.encode()).hexdigest()
     old_hass = FakeHass(old)
-    from oblo_living.config_flow import async_migrate_entry
+    # HA resolves this on the component module, not the config flow
+    import oblo_living as _c
+    check("async_migrate_entry exposed on component module (HA contract)",
+          hasattr(_c, "async_migrate_entry"),
+          dir(_c)[:0] or "missing on oblo_living/__init__.py")
+    from oblo_living import async_migrate_entry
     migrated = await async_migrate_entry(old_hass, old)
     check("v1 entry migrates", migrated is True, migrated)
     check("entry version bumped to 2", old.version == 2, old.version)
