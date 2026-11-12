@@ -6,12 +6,89 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN, CONF_IDENTITY, CONF_SECRET
-from .cloud_api import ObloCloudApi
+from .cloud_api import ObloCloudApi, ObloCloudError
+from .cloud_mqtt import ObloCloudMqtt
 from .coordinator import ObloDataCoordinator
 from .hub import ObloHub
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = ["binary_sensor", "sensor"]  # switch/light need the cloud command API (not yet)
+
+
+def _pick_gateway_identity(raw_gateways, api):
+    """Resolve (gateway_owner_user_id, serial) from the raw /udm/device/list payload.
+
+    The published topic uses the GATEWAY OWNER's userId, not the logged-in
+    user's, so a wrong/absent value silently publishes to `None` and the broker
+    drops it (QoS 0 -> bare 15 s timeout, no error). Prefer the object that
+    actually carries a serial; fall back to the login user id only for userId.
+    Never invent a serial.
+    """
+    candidates = [g for g in (raw_gateways or []) if isinstance(g, dict)]
+    # prefer containers that look like gateways (carry a serial)
+    with_serial = [g for g in candidates
+                   if g.get("serialNumber") or g.get("serial") or g.get("sn")]
+    gw = (with_serial or candidates or [{}])[0]
+
+    user_id = str(gw.get("userId") or gw.get("userID") or api.user_id or "")
+    serial = str(gw.get("serialNumber") or gw.get("serial")
+                 or gw.get("sn") or gw.get("deviceSN") or "")
+    return user_id, serial, sorted(gw.keys())
+
+
+async def _async_start_ohm(hass, api, coordinator):
+    """Connect the cloud MQTT/OHM client and attach it to the coordinator.
+
+    Returns the client, or None when OHM is unavailable. Never raises: a broken
+    MQTT path degrades the entry to REST-only instead of failing setup.
+    """
+    if not api.session_id or not api.username:
+        _LOGGER.warning("OHM skipped: no cloud session (session_id=%r username=%r)",
+                        api.session_id, api.username)
+        return None
+
+    try:
+        raw = await api.async_list_gateways()
+    except ObloCloudError as err:
+        _LOGGER.warning("OHM skipped: gateway list failed: %s", err)
+        return None
+
+    user_id, serial, keys = _pick_gateway_identity(raw, api)
+    # Guard the silent-None-publish trap: both values are mandatory for the topic.
+    if not user_id or not serial:
+        _LOGGER.warning(
+            "OHM skipped: gateway payload lacks userId/serial "
+            "(user_id=%r serial=%r keys=%s)",
+            user_id, serial, keys)
+        return None
+
+    client = ObloCloudMqtt(
+        session_id=api.session_id,
+        user_id=user_id,
+        username=api.username,
+        gateway_serial=serial,
+        hass_loop=hass.loop,
+    )
+    # One INFO line so a wrong topic is visible in the log, not a bare timeout.
+    _LOGGER.info("OHM topic oblo/%s/gtw/%s/ohm/req (admin=%s)",
+                 user_id, serial, "admin" in (api.groups or []))
+
+    try:
+        await client.async_connect()
+        coordinator.set_ohm_client(client)
+        await coordinator.async_request_refresh()
+        _LOGGER.info("OHM connected: devices=%d", len(coordinator.devices))
+        return client
+    except ObloCloudError as err:
+        _LOGGER.warning("OHM unavailable, REST-only mode: %s", err)
+    except Exception as err:  # noqa: BLE001 - never fail setup on MQTT problems
+        _LOGGER.warning("OHM setup failed, REST-only mode: %s", err)
+    try:
+        await client.async_close()
+    except Exception:  # noqa: BLE001
+        pass
+    coordinator.set_ohm_client(None)
+    return None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -34,6 +111,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
     _LOGGER.info("cloud session=%s devices=%d", api.session_id, len(coordinator.devices))
 
+    # ── Cloud MQTT / OHM ────────────────────────────────────────────────
+    # REST only returns the gateway container; the device inventory with
+    # service_list lives behind OHM commands over MQTT. Attaching the client
+    # makes the coordinator merge real devices in. A failure here must NOT
+    # fail the config entry -- we degrade to REST-only and retry next restart.
+    ohm = await _async_start_ohm(hass, api, coordinator)
+
     # build hub from normalised devices
     hub = ObloHub()
     hub.load_from_normalised(coordinator.devices)
@@ -43,6 +127,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "api": api,
         "coordinator": coordinator,
         "hub": hub,
+        "ohm": ohm,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -51,6 +136,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload."""
+    data = hass.data.get(DOMAIN, {}).get(entry.entry_id) or {}
+    ohm = data.get("ohm")
+    coord = data.get("coordinator")
+    if coord is not None:
+        coord.set_ohm_client(None)
+    if ohm is not None:
+        try:
+            await ohm.async_close()
+        except Exception:  # noqa: BLE001 - unload must never raise on MQTT
+            pass
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         hass.data[DOMAIN].pop(entry.entry_id, None)

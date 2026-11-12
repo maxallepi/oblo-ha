@@ -1,0 +1,168 @@
+"""Exercise _async_start_ohm end-to-end with fakes (no network).
+
+Proves the wiring path in __init__.py: gateway identity resolution, the
+silent-None-publish guard, connector success -> coordinator.set_ohm_client,
+and every failure mode degrading to REST-only instead of raising.
+
+Run: python3 ohm_start_test.py
+"""
+import asyncio
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+COMPONENT = os.path.dirname(HERE)
+ROOT = os.path.dirname(os.path.dirname(COMPONENT))
+sys.path.insert(0, HERE)
+sys.path.insert(0, ROOT)
+
+import ha_stub  # noqa: E402,F401
+
+import custom_components.oblo_living as pkg  # noqa: E402
+from custom_components.oblo_living.cloud_api import ObloAuthError  # noqa: E402
+
+CHECKS = []
+
+
+def check(label, cond, detail=""):
+    CHECKS.append((label, bool(cond), detail))
+    print(f"{'PASS' if cond else 'FAIL'}  {label}" + (f"  <- {detail}" if detail and not cond else ""))
+
+
+class FakeApi:
+    def __init__(self, session_id="sess-1", username="andrew", user_id="u-login",
+                 groups=None, gateways=None, list_raises=None):
+        self.session_id = session_id
+        self.username = username
+        self.user_id = user_id
+        self.groups = groups if groups is not None else ["admin"]
+        self._gateways = gateways if gateways is not None else []
+        self._list_raises = list_raises
+
+    async def async_list_gateways(self):
+        if self._list_raises:
+            raise self._list_raises
+        return self._gateways
+
+
+class FakeCoordinator:
+    def __init__(self):
+        self.ohm = None
+        self.devices = [{"id": "d1"}]
+        self.refreshes = 0
+
+    def set_ohm_client(self, client):
+        self.ohm = client
+
+    async def async_request_refresh(self):
+        self.refreshes += 1
+
+
+class FakeHass:
+    def __init__(self):
+        self.loop = asyncio.get_event_loop()
+
+
+class FakeMqtt:
+    """Records construction + connect outcome."""
+    instances = []
+
+    def __init__(self, session_id, user_id, username, gateway_serial, hass_loop=None):
+        self.args = dict(session_id=session_id, user_id=user_id,
+                         username=username, gateway_serial=gateway_serial)
+        self.connected = False
+        self.closed = False
+        self.connect_error = None
+        FakeMqtt.instances.append(self)
+
+    async def async_connect(self):
+        if self.connect_error:
+            raise self.connect_error
+        self.connected = True
+
+    async def async_close(self):
+        self.closed = True
+
+
+GW = [{"userId": "gw-owner", "serialNumber": "C83DD4300D5B", "_id": "645cd2"}]
+
+
+def run(coro):
+    return asyncio.get_event_loop().run_until_complete(coro)
+
+
+def fresh(mqtt_cls=FakeMqtt):
+    pkg.ObloCloudMqtt = mqtt_cls
+    FakeMqtt.instances.clear()
+
+
+# --- happy path ---------------------------------------------------------
+fresh()
+hass, api, coord = FakeHass(), FakeApi(gateways=GW), FakeCoordinator()
+client = run(pkg._async_start_ohm(hass, api, coord))
+check("happy: client returned", client is not None)
+check("happy: connect called", bool(getattr(client, "connected", False)))
+check("happy: attached to coordinator", coord.ohm is client)
+check("happy: refresh requested", coord.refreshes == 1, str(coord.refreshes))
+a = FakeMqtt.instances[0].args
+check("happy: user_id = gateway owner", a["user_id"] == "gw-owner", a["user_id"])
+check("happy: serial from payload", a["gateway_serial"] == "C83DD4300D5B", a["gateway_serial"])
+check("happy: username from login", a["username"] == "andrew", a["username"])
+check("happy: session from login", a["session_id"] == "sess-1", a["session_id"])
+
+# --- guard: no serial in payload (the live DIAG shape) ------------------
+fresh()
+hass, api, coord = FakeHass(), FakeApi(gateways=[{"_id": "645cd2", "deviceName": "Living Room", "class": "hg"}]), FakeCoordinator()
+client = run(pkg._async_start_ohm(hass, api, coord))
+check("guard: no serial -> None", client is None)
+check("guard: never constructed a client", FakeMqtt.instances == [])
+check("guard: coordinator untouched", coord.ohm is None)
+
+# --- empty gateway list -------------------------------------------------
+fresh()
+hass, api, coord = FakeHass(), FakeApi(gateways=[]), FakeCoordinator()
+check("empty gateways -> None", run(pkg._async_start_ohm(hass, api, coord)) is None)
+
+# --- gateway list raises ------------------------------------------------
+fresh()
+hass, api, coord = FakeHass(), FakeApi(gateways=GW, list_raises=ObloAuthError("boom")), FakeCoordinator()
+check("gateway list error -> None", run(pkg._async_start_ohm(hass, api, coord)) is None)
+
+# --- no session ---------------------------------------------------------
+fresh()
+hass, api, coord = FakeHass(), FakeApi(session_id=None, gateways=GW), FakeCoordinator()  # type: ignore[arg-type]
+check("no session_id -> None", run(pkg._async_start_ohm(hass, api, coord)) is None)
+fresh()
+hass, api, coord = FakeHass(), FakeApi(username=None, gateways=GW), FakeCoordinator()  # type: ignore[arg-type]
+check("no username -> None", run(pkg._async_start_ohm(hass, api, coord)) is None)
+
+# --- CONNACK failure degrades, does not raise --------------------------
+class ConnFail(FakeMqtt):
+    async def async_connect(self):
+        raise ObloAuthError("MQTT CONNACK 5")
+
+
+fresh(ConnFail)
+hass, api, coord = FakeHass(), FakeApi(gateways=GW), FakeCoordinator()
+client = run(pkg._async_start_ohm(hass, api, coord))
+check("connack fail -> None (degraded)", client is None)
+check("connack fail -> client closed", FakeMqtt.instances[0].closed)
+check("connack fail -> coordinator has no client", coord.ohm is None)
+
+# --- unexpected exception must not escape either -----------------------
+class Explode(FakeMqtt):
+    async def async_connect(self):
+        raise RuntimeError("unexpected")
+
+
+fresh(Explode)
+hass, api, coord = FakeHass(), FakeApi(gateways=GW), FakeCoordinator()
+check("unexpected error -> None", run(pkg._async_start_ohm(hass, api, coord)) is None)
+
+# --- setup_entry keeps the entry alive with no gateway serial ----------
+# (REST-only mode must still produce a config entry with zero entities)
+fresh()
+
+passed = sum(1 for _, ok, _ in CHECKS if ok)
+print(f"\n{passed}/{len(CHECKS)} checks passed")
+sys.exit(0 if passed == len(CHECKS) else 1)

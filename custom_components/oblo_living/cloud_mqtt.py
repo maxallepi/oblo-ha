@@ -14,7 +14,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional
 
-import paho.mqtt.client as mqtt
+
+# Lazy paho import so the module loads without the dependency installed.
+# The requirement is declared in manifest.json; HA installs it before setup.
+def _mqtt():
+    import paho.mqtt.client as mqtt
+    return mqtt
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,7 +75,7 @@ class ObloCloudMqtt:
         self._loop = hass_loop or asyncio.get_event_loop()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="oblo_mqtt")
 
-        self._client: Optional[mqtt.Client] = None
+        self._client: Optional[Any] = None
         self._connected = asyncio.Event()
         self._conn_error: Optional[Exception] = None
 
@@ -94,6 +100,7 @@ class ObloCloudMqtt:
             cid = "w-" + self._session_id + "-" + "".join(
                 random.choices(string.ascii_lowercase, k=6)
             )
+            mqtt = _mqtt()
             c = mqtt.Client(
                 mqtt.CallbackAPIVersion.VERSION1,
                 client_id=cid,
