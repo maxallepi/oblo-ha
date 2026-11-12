@@ -2,6 +2,7 @@
 import logging
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity, DataUpdateCoordinator, UpdateFailed,
 )
@@ -67,6 +68,10 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             _LOGGER.info("cloud session expired (%s), re-logging in", err)
             try:
                 return await self._async_refresh_relogin()
+            except ObloAuthError as err2:
+                # credentials themselves rejected -> HA shows the reauth form
+                _LOGGER.error("cloud re-login rejected: %s", err2)
+                raise ConfigEntryAuthFailed(str(err2)) from err2
             except ObloCloudError as err2:
                 raise UpdateFailed(str(err2)) from err2
         except ObloCloudError as err:

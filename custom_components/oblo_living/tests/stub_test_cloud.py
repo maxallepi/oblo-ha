@@ -7,7 +7,13 @@ Verifies:
 """
 import sys
 import json
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
+
+# repo root so "custom_components.oblo_living" imports without PYTHONPATH
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, REPO)
 
 # mock HA imports BEFORE importing component
 import ha_stub; ha_stub.install()

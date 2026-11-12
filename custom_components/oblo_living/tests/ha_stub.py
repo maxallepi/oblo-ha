@@ -21,11 +21,22 @@ def install():
         return
 
     ha = _mod("homeassistant", package=True)
-    ha.__getattr__ = lambda name: MagicMock()
-
     ce = _mod("homeassistant.config_entries")
     ce.ConfigEntry = MagicMock
-    ce.ConfigFlow = MagicMock
+
+    class ConfigFlow:
+        def __init_subclass__(cls, domain=None, **kwargs):
+            cls._domain = domain
+            super().__init_subclass__(**kwargs)
+
+    ce.ConfigFlow = ConfigFlow
+
+    exc = _mod("homeassistant.exceptions")
+
+    class ConfigEntryAuthFailed(Exception):
+        pass
+
+    exc.ConfigEntryAuthFailed = ConfigEntryAuthFailed
 
     core = _mod("homeassistant.core")
     core.HomeAssistant = MagicMock
@@ -64,6 +75,12 @@ def install():
 
     util = _mod("homeassistant.util")
     util.dt = MagicMock()
+
+    # wire submodules onto the package so 'from homeassistant import X' works
+    ha.config_entries = ce
+    ha.core = core
+    ha.exceptions = exc
+    ha.helpers = helpers
 
 
 install()

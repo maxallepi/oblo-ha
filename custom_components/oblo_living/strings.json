@@ -8,6 +8,13 @@
           "identity": "Email or username",
           "secret": "Password"
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate OBLO Living",
+        "description": "The cloud session for {identity} expired or was rejected. Enter the password for this OBLO account to renew it.",
+        "data": {
+          "secret": "Password"
+        }
       }
     },
     "error": {
@@ -16,7 +23,8 @@
       "unknown": "Unexpected error during login."
     },
     "abort": {
-      "already_configured": "This account is already set up."
+      "already_configured": "This account is already set up.",
+      "reauth_successful": "Cloud session renewed."
     }
   }
 }
