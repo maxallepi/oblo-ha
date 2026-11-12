@@ -82,8 +82,14 @@ async def _async_start_ohm(hass, api, coordinator):
         hass_loop=hass.loop,
     )
     # One INFO line so a wrong topic is visible in the log, not a bare timeout.
-    _LOGGER.info("OHM topic oblo/%s/gtw/%s/ohm/req (admin=%s)",
-                 user_id, serial, "admin" in (api.groups or []))
+    # The MQTT username is a credential under the shared literal password, so it
+    # is masked here -- only its shape and source are printed.
+    _uname = api.username or ""
+    _masked = (f"{_uname[:4]}...{_uname[-4:]} (len={len(_uname)})"
+               if len(_uname) > 8 else f"{_uname!r} (len={len(_uname)})")
+    _LOGGER.info(
+        "OHM topic oblo/%s/gtw/%s/ohm/req (admin=%s, mqtt_user cli/%s)",
+        user_id, serial, "admin" in (api.groups or []), _masked)
 
     try:
         await client.async_connect()

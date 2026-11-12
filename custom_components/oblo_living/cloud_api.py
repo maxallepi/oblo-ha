@@ -161,8 +161,20 @@ class ObloCloudApi:
             _LOGGER.error("login 200 but no session id; body keys=%s", sorted(blob))
             raise ObloResponseError(
                 "login succeeded but no sessionid header/body id in response")
-        _LOGGER.debug("cloud login ok user_id=%s groups=%s",
-                      self.user_id, self.groups)
+        # The cloud MQTT broker authenticates on the USERNAME alone (password is
+        # the shared literal "password"), so `blob["username"]` is a credential.
+        # Log only its shape: presence, length and a masked form. Also log the
+        # field NAMES of the user object -- never values -- so a missing
+        # `username` key is obvious in one paste instead of another round trip.
+        uname = self.username
+        _LOGGER.info(
+            "cloud login ok user_id=%s groups=%s username=%s present=%s user_keys=%s",
+            self.user_id, self.groups,
+            (f"{uname[:4]}...{uname[-4:]} (len={len(uname)})"
+             if isinstance(uname, str) and len(uname) > 8
+             else (f"{uname!r} (len={len(uname)})" if isinstance(uname, str)
+                   else repr(uname))),
+            bool(uname), sorted(blob.keys()))
         return blob
 
     # -- data ---------------------------------------------------------------

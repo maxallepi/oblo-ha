@@ -8,7 +8,6 @@ import json
 import logging
 import random
 import ssl
-import string
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -106,9 +105,10 @@ class ObloCloudMqtt:
             return
 
         def _connect_blocking():
-            cid = "w-" + self._session_id + "-" + "".join(
-                random.choices(string.ascii_lowercase, k=6)
-            )
+            # clientId shape copied from the SPA: "w-" + sessionId + "-" + 1..1000
+            # (app.js: Math.floor(1e3*Math.random())+1). Some brokers ACL on the
+            # clientId prefix, so match it exactly rather than inventing a format.
+            cid = "w-" + self._session_id + "-" + str(random.randint(1, 1000))
             mqtt = _mqtt()
             # paho 2.x takes a CallbackAPIVersion positionally; 1.x does not.
             # manifest pins >=2.0.0, this keeps an unexpected 1.6 working too.
