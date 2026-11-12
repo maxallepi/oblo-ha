@@ -11,6 +11,43 @@ from .cloud_api import (ObloAuthError, ObloCloudApi, ObloCloudError,
                            ObloRateLimitError, normalise_devices)
 from .const import DOMAIN, SCAN_INTERVAL_S
 
+
+def normalise_ohm_objects(ohm_objects):
+    """Convert OHM object_list from cloud MQTT to internal device shape.
+
+    OHM object has:
+      - id (str)
+      - device_name (str)
+      - service_list: list of {name, category, property_list: [{name, value}]}
+
+    Internal device shape (what build_entities consumes):
+      - id, name, class (optional), services: list of {service, props: dict}
+    """
+    devices = []
+    for obj in ohm_objects or []:
+        did = obj.get("id")
+        if not did:
+            continue
+        services = []
+        for svc in obj.get("service_list") or []:
+            sname = svc.get("name")
+            if not sname:
+                continue
+            props = {}
+            for prop in svc.get("property_list") or []:
+                pname = prop.get("name")
+                pval = prop.get("value")
+                if pname:
+                    props[pname] = pval
+            services.append({"service": sname, "props": props})
+        devices.append({
+            "id": did,
+            "name": obj.get("device_name") or did,
+            "class": "ohm",  # mark as OHM-sourced
+            "services": services,
+        })
+    return devices
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -49,6 +86,17 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             update_interval=__import__("datetime").timedelta(seconds=SCAN_INTERVAL_S))
         self.api = api
         self.devices = []
+        # Optional cloud MQTT/OHM client. REST only returns the gateway object;
+        # the device inventory with service_list lives behind OHM commands, so
+        # when a client is attached its object_list is merged in and wins on
+        # richness. Interface expected (see cloud_mqtt.py):
+        #   await client.async_object_list() -> list of OHM objects
+        #   await client.async_close()
+        self.ohm = None
+
+    def set_ohm_client(self, client):
+        """Attach the cloud MQTT/OHM client (or None to disable)."""
+        self.ohm = client
 
     async def _async_refresh_relogin(self):
         """Refresh after re-authentication once."""
@@ -58,8 +106,27 @@ class ObloDataCoordinator(DataUpdateCoordinator):
     async def _async_fetch(self):
         gateways = await self.api.async_list_gateways()
         details = await self.api.async_gateway_devices()
-        self.devices = merge_devices(normalise_devices(gateways),
+        rest_devices = merge_devices(normalise_devices(gateways),
                                      normalise_devices(details))
+
+        # OHM over cloud MQTT is the only source that carries service_list.
+        # Failure here must not break the poll -- fall back to REST data and
+        # let the next scheduled refresh retry the MQTT round trip.
+        ohm_devices = []
+        if self.ohm is not None:
+            try:
+                objects = await self.ohm.async_object_list()
+                ohm_devices = normalise_ohm_objects(objects)
+                if ohm_devices:
+                    _LOGGER.debug("OHM returned %d objects", len(ohm_devices))
+            except ObloAuthError:
+                raise
+            except ObloRateLimitError:
+                raise
+            except Exception as err:
+                _LOGGER.warning("OHM object list failed, using REST data: %s", err)
+
+        self.devices = merge_devices(rest_devices, ohm_devices)
 
         # --- DIAGNOSTIC DUMP (v0.2.13) ---
         # One-time WARNING-level dump of RAW payloads from both cloud endpoints
