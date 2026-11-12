@@ -76,9 +76,12 @@ class FakeMqtt:
     """Records construction + connect outcome."""
     instances = []
 
-    def __init__(self, session_id, user_id, username, gateway_serial, hass_loop=None):
+    def __init__(self, session_id, user_id, username, gateway_serial,
+                 hass_loop=None, groups=None):
         self.args = dict(session_id=session_id, user_id=user_id,
-                         username=username, gateway_serial=gateway_serial)
+                         username=username, gateway_serial=gateway_serial,
+                         groups=groups)
+        self.groups = groups
         self.connected = False
         self.closed = False
         self.connect_error = None

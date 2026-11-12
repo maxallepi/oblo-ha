@@ -137,8 +137,10 @@ async def test_events():
     c, fake = make_client()
     got = []
     await c.async_subscribe_events(got.append)
-    check("evt subscription made",
-          any("/gtw/+/ohm/evt" in s for s in fake.subscriptions), fake.subscriptions)
+    # SPA subscribes oblo/<uid>/gtw/<SN>/+/evt -- the + is the device/bus id.
+    check("evt subscription uses SPA topic shape",
+          any("/gtw/C83DD4300D5B/+/evt" in s for s in fake.subscriptions),
+          fake.subscriptions)
     c._on_message(None, None, types.SimpleNamespace(
         topic="oblo/uid0123456789abcdef/gtw/C83DD4300D5B/ohm/evt",
         payload=json.dumps({"name": "device_property_changed",

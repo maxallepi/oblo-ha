@@ -56,6 +56,7 @@ class ObloCloudMqtt:
         username: str,
         gateway_serial: str,
         hass_loop: Optional[asyncio.AbstractEventLoop] = None,
+        groups: Optional[List[str]] = None,
     ):
         """
         Args:
@@ -66,11 +67,15 @@ class ObloCloudMqtt:
             username: from retrieveSSOTokens -> username (used as cli/<username>)
             gateway_serial: from /udm/device/list -> serialNumber (SN)
             hass_loop: HA event loop for thread-safe callbacks (None = current loop)
+            groups: the account's group list from /auth/login. Selects the OHM
+                    `sender` field: admin replies on cli/<sessionId>, everyone
+                    else on cli/<userId>.
         """
         self._session_id = session_id
         self._user_id = user_id
         self._username = username
         self._gateway_serial = gateway_serial
+        self._groups = groups or []
         self._loop = hass_loop or asyncio.get_event_loop()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="oblo_mqtt")
 
@@ -98,6 +103,27 @@ class ObloCloudMqtt:
         if len(s) <= 8:
             return s[0] + "*" * (len(s) - 1)
         return s[:4] + "..." + s[-4:] + f" (len={len(s)})"
+
+    def _sender(self) -> str:
+        """The `sender` routing field the gateway needs to answer us.
+
+        app.js sets this on EVERY OHM publish (two independent code paths,
+        both agree):
+
+            admin            -> "cli/" + sessionId
+            non-admin w/parents -> "cli/" + <gateway owner userId>
+            otherwise        -> "cli/" + <logged-in userId>
+
+        It is not optional metadata: the gateway echoes it back as the reply
+        topic (`oblo/<gtwUserId>/<sender>/rsp`). Omit it and the reply is
+        unroutable -- the request is accepted and then silently dropped, which
+        is indistinguishable from a dead uplink (3 x 15s timeouts, no error).
+        """
+        if "admin" in self._groups:
+            return f"cli/{self._session_id}"
+        # Non-admin: the gateway owner's id is what the SPA uses when the
+        # account has parentsIds, which is the shared-access case.
+        return f"cli/{self._user_id}"
 
     async def async_connect(self) -> None:
         """Open WSS, MQTT CONNECT, subscribe response topic."""
@@ -135,6 +161,11 @@ class ObloCloudMqtt:
             c.on_connect = self._on_connect
             c.on_message = self._on_message
             c.on_disconnect = self._on_disconnect
+            # paho 1.x has no on_subscribe_v2; the 1-arg form works on both.
+            try:
+                c.on_subscribe = self._on_subscribe
+            except Exception:  # pragma: no cover - never block connect on logging
+                pass
 
             try:
                 c.connect(WSS_HOST, WSS_PORT, KEEPALIVE)
@@ -173,6 +204,8 @@ class ObloCloudMqtt:
                 "params": {"type": "device"},
                 "type": "command",
                 "uid": uid,
+                # Mandatory: the gateway uses this to pick the reply topic.
+                "sender": self._sender(),
             }
             req_topic = f"oblo/{self._user_id}/gtw/{self._gateway_serial}/ohm/req"
 
@@ -214,7 +247,7 @@ class ObloCloudMqtt:
         raise last_err or ObloTimeoutError("OHM object_list failed after retries")
 
     async def async_subscribe_events(self, callback: Callable[[Dict], None]) -> None:
-        """Subscribe to ohm/evt for live device property changes."""
+        """Subscribe to gateway events for live device property changes."""
         if self._evt_cb is not None:
             return
         self._evt_cb = callback
@@ -225,11 +258,13 @@ class ObloCloudMqtt:
         client = self._client
         if client is None:
             raise ObloAuthError("MQTT client not connected")
-        evt_topic = f"oblo/{self._user_id}/gtw/+/ohm/evt"
+        # SPA: oblo/<gtwUserId>/gtw/<SN>/+/evt  (the + is the device/bus id).
+        # The earlier "gtw/+/ohm/evt" shape matched nothing the gateway emits.
+        evt_topic = f"oblo/{self._user_id}/gtw/{self._gateway_serial}/+/evt"
         def _sub(c=client):
             c.subscribe(evt_topic, 1)
         await self._loop.run_in_executor(self._executor, _sub)
-        _LOGGER.debug("Subscribed to live events: %s", evt_topic)
+        _LOGGER.info("OHM events subscribed: %s", evt_topic)
 
     async def async_close(self) -> None:
         """Clean disconnect."""
@@ -252,20 +287,24 @@ class ObloCloudMqtt:
     # ------------------------------------------------------------------ #
 
     def _on_connect(self, client: Any, userdata, flags, rc, *extra):
-        _LOGGER.debug("MQTT CONNACK rc=%s", rc)
+        _LOGGER.info("MQTT CONNACK rc=%s", rc)
         client = client or self._client
         if rc == 0 and client is None:
             self._conn_error = ObloAuthError("no MQTT client to subscribe with")
         elif rc == 0:
-            # subscribe response topic (admin path uses sessionId)
-            rsp_topic = f"oblo/{self._user_id}/cli/{self._session_id}/rsp"
-            client.subscribe(rsp_topic, 1)
-            _LOGGER.debug("SUB %s", rsp_topic)
+            # subscribe response topics: SPA subscribes BOTH /req and /rsp because
+            # the gateway replies on /req for some message classes (it's a
+            # "request" back to the client). Omitting /req silently drops those.
+            for suffix in ("rsp", "req"):
+                rsp_topic = f"oblo/{self._user_id}/cli/{self._session_id}/{suffix}"
+                client.subscribe(rsp_topic, 1)
+                _LOGGER.info("SUB %s", rsp_topic)
             # also non-admin / sharing path (userId)
             if self._user_id != self._session_id:
-                rsp_alt = f"oblo/{self._user_id}/cli/{self._user_id}/rsp"
-                client.subscribe(rsp_alt, 1)
-                _LOGGER.debug("SUB %s", rsp_alt)
+                for suffix in ("rsp", "req"):
+                    rsp_alt = f"oblo/{self._user_id}/cli/{self._user_id}/{suffix}"
+                    client.subscribe(rsp_alt, 1)
+                    _LOGGER.info("SUB %s", rsp_alt)
             self._conn_error = None
         else:
             # CONNACK 5 (Not authorized) means the broker rejected the identity
@@ -275,6 +314,9 @@ class ObloCloudMqtt:
                 f"MQTT CONNACK {rc} for username {self._mask(self._username)} "
                 f"(serial {self._gateway_serial})")
         self._connected.set()
+
+    def _on_subscribe(self, client, userdata, mid, granted_qos, *extra):
+        _LOGGER.info("SUBACK mid=%s granted_qos=%s", mid, granted_qos)
 
     # alias for tests that invoke the method directly
     def on_connect(self, client, userdata, flags, rc, *extra):
@@ -288,11 +330,18 @@ class ObloCloudMqtt:
             _LOGGER.warning("MQTT parse error on %s: %s", topic, e)
             return
 
-        # Response to our OHM request? Topic contains cli/<sessionId>/rsp or cli/<userId>/rsp
-        if topic.endswith("/rsp"):
-            uid = payload.get("uid")
-            if isinstance(uid, int):
-                fut = self._futures.pop(uid, None)
+        # Response to our OHM request? The SPA subscribes BOTH cli/<id>/req and
+        # cli/<id>/rsp and routes purely on uid, so accept either suffix: the
+        # gateway answers some message classes on /req (it is a "request" back
+        # to the client). Matching only /rsp silently drops those.
+        uid = payload.get("uid")
+        if uid is not None:
+            try:
+                uid_key = int(uid)
+            except (TypeError, ValueError):
+                uid_key = None
+            if uid_key is not None and uid_key in self._futures:
+                fut = self._futures.pop(uid_key, None)
                 if fut and not fut.done():
                     code = payload.get("code", -1)
                     if code == 0 or str(code) == "0":
@@ -304,8 +353,10 @@ class ObloCloudMqtt:
                         self._loop.call_soon_threadsafe(
                             fut.set_exception, ObloAuthError(msg_text)
                         )
+                return
+
         # Live event
-        elif self._evt_cb and "/evt" in topic:
+        if self._evt_cb and "/evt" in topic:
             self._loop.call_soon_threadsafe(self._evt_cb, payload)
 
     def _on_disconnect(self, client, userdata, rc, *extra):
