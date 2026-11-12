@@ -31,13 +31,22 @@ def check(label, cond, detail=""):
 
 class FakeApi:
     def __init__(self, session_id="sess-1", username="andrew", user_id="u-login",
-                 groups=None, gateways=None, list_raises=None):
+                 groups=None, gateways=None, list_raises=None, login_fills=False):
         self.session_id = session_id
         self.username = username
         self.user_id = user_id
         self.groups = groups if groups is not None else ["admin"]
         self._gateways = gateways if gateways is not None else []
         self._list_raises = list_raises
+        self._login_fills = login_fills   # emulate real login populating fields
+        self.login_calls = 0
+
+    async def async_login(self):
+        self.login_calls += 1
+        if self._login_fills:
+            self.session_id = "sess-from-login"
+            self.username = "andrew-from-login"
+            self.groups = ["admin"]
 
     async def async_list_gateways(self):
         if self._list_raises:
@@ -128,13 +137,47 @@ fresh()
 hass, api, coord = FakeHass(), FakeApi(gateways=GW, list_raises=ObloAuthError("boom")), FakeCoordinator()
 check("gateway list error -> None", run(pkg._async_start_ohm(hass, api, coord)) is None)
 
-# --- no session ---------------------------------------------------------
+# --- cached session: session_id restored, username/groups missing ------
+# This is the real HA-restart case: __init__ restores session_id from
+# entry.data, so the coordinator does NOT log in and username stays None.
 fresh()
-hass, api, coord = FakeHass(), FakeApi(session_id=None, gateways=GW), FakeCoordinator()  # type: ignore[arg-type]
-check("no session_id -> None", run(pkg._async_start_ohm(hass, api, coord)) is None)
+hass = FakeHass()
+api = FakeApi(username=None, groups=[], gateways=GW, login_fills=True)
+coord = FakeCoordinator()
+client = run(pkg._async_start_ohm(hass, api, coord))
+check("cached session -> forced login", api.login_calls == 1, str(api.login_calls))
+check("cached session -> OHM starts after login", client is not None)
+check("cached session -> username from login",
+      FakeMqtt.instances and FakeMqtt.instances[0].args["username"] == "andrew-from-login",
+      str(FakeMqtt.instances[0].args["username"]) if FakeMqtt.instances else "none")
+
+# --- login that leaves fields empty still degrades ----------------------
 fresh()
-hass, api, coord = FakeHass(), FakeApi(username=None, gateways=GW), FakeCoordinator()  # type: ignore[arg-type]
-check("no username -> None", run(pkg._async_start_ohm(hass, api, coord)) is None)
+hass = FakeHass()
+api = FakeApi(session_id=None, username=None, groups=[], gateways=GW)
+coord = FakeCoordinator()
+check("login leaves no username -> None", run(pkg._async_start_ohm(hass, api, coord)) is None)
+check("login attempted once", api.login_calls == 1, str(api.login_calls))
+
+# --- login raising degrades, does not raise ----------------------------
+fresh()
+class LoginBoom(FakeApi):
+    async def async_login(self):
+        raise ObloAuthError("000016 too many attempts")
+
+
+hass = FakeHass()
+api = LoginBoom(username=None, groups=[], gateways=GW)
+coord = FakeCoordinator()
+check("login error -> None", run(pkg._async_start_ohm(hass, api, coord)) is None)
+
+# --- happy path must NOT log in again (api already has username) --------
+fresh()
+hass = FakeHass()
+api = FakeApi(gateways=GW)
+coord = FakeCoordinator()
+run(pkg._async_start_ohm(hass, api, coord))
+check("happy path does not re-login", api.login_calls == 0, str(api.login_calls))
 
 # --- CONNACK failure degrades, does not raise --------------------------
 class ConnFail(FakeMqtt):

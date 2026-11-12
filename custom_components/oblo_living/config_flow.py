@@ -9,6 +9,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     DOMAIN, CONF_IDENTITY, CONF_SECRET,
     CONF_SESSION_ID, CONF_USER_ID,
+    CONF_USERNAME, CONF_GROUPS,
 )
 from .cloud_api import (
     ObloCloudApi, ObloAuthError, ObloCloudError, ObloRateLimitError,
@@ -93,6 +94,8 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_SECRET: secret,
                             CONF_SESSION_ID: api.session_id,
                             CONF_USER_ID: api.user_id,
+                            CONF_USERNAME: api.username,
+                            CONF_GROUPS: list(api.groups or []),
                         },
                     )
                 except Exception as err:  # noqa: BLE001 - mapped below

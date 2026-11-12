@@ -5,7 +5,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN, CONF_IDENTITY, CONF_SECRET
+from .const import DOMAIN, CONF_IDENTITY, CONF_SECRET, CONF_SESSION_ID, CONF_USER_ID, CONF_USERNAME, CONF_GROUPS
 from .cloud_api import ObloCloudApi, ObloCloudError
 from .cloud_mqtt import ObloCloudMqtt
 from .coordinator import ObloDataCoordinator
@@ -42,6 +42,18 @@ async def _async_start_ohm(hass, api, coordinator):
     Returns the client, or None when OHM is unavailable. Never raises: a broken
     MQTT path degrades the entry to REST-only instead of failing setup.
     """
+    # Cached session restore sets session_id but not username/groups.
+    # Force a login if we don't have what OHM needs.
+    if not api.username or not api.groups:
+        try:
+            await api.async_login()
+        except ObloCloudError as err:
+            _LOGGER.warning("OHM skipped: login failed: %s", err)
+            return None
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("OHM skipped: login error: %s", err)
+            return None
+
     if not api.session_id or not api.username:
         _LOGGER.warning("OHM skipped: no cloud session (session_id=%r username=%r)",
                         api.session_id, api.username)
@@ -102,14 +114,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # restore cached session if present (avoids one login round-trip);
     # the coordinator re-authenticates itself on the first auth failure
-    if entry.data.get("session_id"):
-        api.session_id = entry.data["session_id"]
-        api.user_id = entry.data["user_id"]
+    if entry.data.get(CONF_SESSION_ID):
+        api.session_id = entry.data[CONF_SESSION_ID]
+        api.user_id = entry.data.get(CONF_USER_ID)
+        api.username = entry.data.get(CONF_USERNAME)
+        api.groups = entry.data.get(CONF_GROUPS) or []
 
     # coordinator for periodic polling (re-login + fetch happens inside)
     coordinator = ObloDataCoordinator(hass, api)
     await coordinator.async_config_entry_first_refresh()
     _LOGGER.info("cloud session=%s devices=%d", api.session_id, len(coordinator.devices))
+
+    # persist what we learned so a restart does not need a fresh login
+    # (OHM needs username+groups; a cached session alone does not carry them)
+    saved = {}
+    if api.session_id and entry.data.get(CONF_SESSION_ID) != api.session_id:
+        saved[CONF_SESSION_ID] = api.session_id
+    if api.user_id and entry.data.get(CONF_USER_ID) != api.user_id:
+        saved[CONF_USER_ID] = api.user_id
+    if api.username and entry.data.get(CONF_USERNAME) != api.username:
+        saved[CONF_USERNAME] = api.username
+    if api.groups and entry.data.get(CONF_GROUPS) != api.groups:
+        saved[CONF_GROUPS] = list(api.groups)
+    if saved:
+        hass.config_entries.async_update_entry(entry, data={**entry.data, **saved})
+        _LOGGER.debug("cached cloud session fields: %s", sorted(saved))
 
     # ── Cloud MQTT / OHM ────────────────────────────────────────────────
     # REST only returns the gateway container; the device inventory with

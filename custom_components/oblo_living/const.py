@@ -9,6 +9,8 @@ CONF_IDENTITY = "identity"      # cloud email / username
 CONF_SECRET = "secret"          # cloud password
 CONF_SESSION_ID = "session_id"  # cached, refreshed at setup
 CONF_USER_ID = "user_id"
+CONF_USERNAME = "username"      # cli/<username> for cloud MQTT
+CONF_GROUPS = "groups"          # ["admin"] -> admin OHM path
 SCAN_INTERVAL_S = 60
 
 # -- local mode (paused; kept for fallback) ---------------------------------
