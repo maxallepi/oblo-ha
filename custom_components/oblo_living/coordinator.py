@@ -60,6 +60,31 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         details = await self.api.async_gateway_devices()
         self.devices = merge_devices(normalise_devices(gateways),
                                      normalise_devices(details))
+
+        # --- DIAGNOSTIC DUMP (v0.2.11) ---
+        # One-time WARNING-level dump so Andrew can paste what the cloud
+        # actually returns; removes after we fix SERVICE_MAP.
+        if not getattr(self, "_diag_dumped", False):
+            self._diag_dumped = True
+            try:
+                from .entity_map import build_entities
+                entities = build_entities(self.devices)
+                svc_names = set()
+                for d in self.devices[:3]:
+                    svcs = [s["service"] for s in d.get("services", [])]
+                    svc_names.update(svcs)
+                    _LOGGER.warning(
+                        "DIAG device id=%s name=%r class=%r services=%s",
+                        d.get("id"), d.get("name"), d.get("class"), svcs)
+                _LOGGER.warning(
+                    "DIAG SUMMARY: devices=%d total_services=%d mapped=%d entities=%d",
+                    len(self.devices),
+                    sum(len(d.get("services", [])) for d in self.devices),
+                    len(svc_names),
+                    len(entities))
+            except Exception as e:  # never let diagnostics break the poll
+                _LOGGER.warning("DIAG dump failed: %s", e)
+
         return self.devices
 
     async def _async_update_data(self):
