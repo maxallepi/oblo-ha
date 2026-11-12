@@ -101,12 +101,22 @@ class ObloCloudMqtt:
                 random.choices(string.ascii_lowercase, k=6)
             )
             mqtt = _mqtt()
-            c = mqtt.Client(
-                mqtt.CallbackAPIVersion.VERSION1,
-                client_id=cid,
-                transport="websockets",
-                protocol=mqtt.MQTTv311,
-            )
+            # paho 2.x takes a CallbackAPIVersion positionally; 1.x does not.
+            # manifest pins >=2.0.0, this keeps an unexpected 1.6 working too.
+            api_ver = getattr(mqtt, "CallbackAPIVersion", None)
+            if api_ver is not None:
+                c = mqtt.Client(
+                    api_ver.VERSION1,
+                    client_id=cid,
+                    transport="websockets",
+                    protocol=mqtt.MQTTv311,
+                )
+            else:
+                c = mqtt.Client(
+                    client_id=cid,
+                    transport="websockets",
+                    protocol=mqtt.MQTTv311,
+                )
             self._client = c
             c.username_pw_set("cli/" + self._username, MQTT_PASSWORD)
             c.ws_set_options(path=WSS_PATH)
