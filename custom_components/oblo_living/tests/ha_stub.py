@@ -118,6 +118,12 @@ def install():
         WINDOW = "window"
         TAMPER = "tamper"
         SMOKE = "smoke"
+        MOISTURE = "moisture"
+        GAS = "gas"
+        VIBRATION = "vibration"
+        CONNECTIVITY = "connectivity"
+        SAFETY = "safety"
+        PROBLEM = "problem"
 
     bs_mod.BinarySensorEntity = BinarySensorEntity
     bs_mod.BinarySensorDeviceClass = BinarySensorDeviceClass

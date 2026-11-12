@@ -144,7 +144,9 @@ def main():
 
     # 5. no device_info-less name collisions: names are prefixed with device name
     check("entity names device-prefixed",
-          motion._attr_name == "Hall Motion pir0", str(motion._attr_name))
+          motion._attr_name == "Hall Motion", str(motion._attr_name))
+    check("entity name does not duplicate the device word",
+          "Motion Motion" not in motion._attr_name, str(motion._attr_name))
 
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} checks pass")

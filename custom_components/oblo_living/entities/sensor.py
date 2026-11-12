@@ -10,6 +10,8 @@ from homeassistant.const import (
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from ..entity_map import entity_name, read_prop
+
 
 # HA device-class keys (lowercase, as used in entity_map) -> SensorDeviceClass
 DEVICE_CLASS = {
@@ -37,7 +39,7 @@ class ObloSensor(CoordinatorEntity, SensorEntity):
         # {device_id, name, service, platform, device_class, unit, value_prop, unique_id}
         super().__init__(coordinator)
         self._ent = ent
-        self._attr_name = f"{ent['name']} {ent['service']}".strip()
+        self._attr_name = entity_name(ent["name"], ent["service"])
         self._attr_unique_id = ent["unique_id"]
         if ent.get("device_class"):
             self._attr_device_class = DEVICE_CLASS.get(ent["device_class"])
@@ -60,8 +62,7 @@ class ObloSensor(CoordinatorEntity, SensorEntity):
         for svc in dev.get("services", []):
             if svc.get("service") != self._ent["service"]:
                 continue
-            props = dict(svc.get("props") or [])
-            val = props.get(self._ent.get("value_prop"))
+            val = read_prop(svc, self._ent.get("value_prop"))
             if val is None:
                 return None
             try:
