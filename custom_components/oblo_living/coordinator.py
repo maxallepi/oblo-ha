@@ -61,12 +61,18 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         self.devices = merge_devices(normalise_devices(gateways),
                                      normalise_devices(details))
 
-        # --- DIAGNOSTIC DUMP (v0.2.11) ---
-        # One-time WARNING-level dump so Andrew can paste what the cloud
-        # actually returns; removes after we fix SERVICE_MAP.
+        # --- DIAGNOSTIC DUMP (v0.2.13) ---
+        # One-time WARNING-level dump of RAW payloads from both cloud endpoints
+        # so we can see the exact structure and find where child devices live.
         if not getattr(self, "_diag_dumped", False):
             self._diag_dumped = True
             try:
+                import json
+                _LOGGER.warning("DIAG RAW GATEWAYS: %s",
+                                json.dumps(gateways, default=str)[:3000])
+                _LOGGER.warning("DIAG RAW DETAILS: %s",
+                                json.dumps(details, default=str)[:3000])
+
                 from .entity_map import build_entities
                 entities = build_entities(self.devices)
                 svc_names = set()
