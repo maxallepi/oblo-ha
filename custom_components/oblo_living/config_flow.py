@@ -10,7 +10,10 @@ from .const import (
     DOMAIN, CONF_IDENTITY, CONF_SECRET,
     CONF_SESSION_ID, CONF_USER_ID,
 )
-from .cloud_api import ObloCloudApi, ObloAuthError, ObloCloudError, ObloResponseError, md5_hex
+from .cloud_api import (
+    ObloCloudApi, ObloAuthError, ObloCloudError, ObloRateLimitError,
+    ObloResponseError, md5_hex,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +49,11 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # forced logout (401/000622), session rejected (403/00003)
             _LOGGER.info("login rejected: %s", err)
             return "invalid_auth"
+        if isinstance(err, ObloRateLimitError):
+            # the ACCOUNT is temporarily blocked: even a correct password fails
+            # until the block lifts. Must be checked before ObloCloudError.
+            _LOGGER.warning("cloud account temporarily blocked: %s", err)
+            return "rate_limited"
         if isinstance(err, ObloResponseError):
             # reached the cloud, but 5xx / unparseable answer
             _LOGGER.warning("cloud answered unexpectedly: %s", err)

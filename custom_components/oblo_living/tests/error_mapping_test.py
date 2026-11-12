@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import sys
+from typing import cast
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 COMPONENT = os.path.dirname(HERE)
@@ -27,7 +28,8 @@ import aiohttp  # noqa: E402
 from aiohttp import web  # noqa: E402
 
 from custom_components.oblo_living.cloud_api import (  # noqa: E402
-    ObloAuthError, ObloCloudApi, ObloCloudError, ObloResponseError,
+    ObloAuthError, ObloCloudApi, ObloCloudError, ObloRateLimitError,
+    ObloResponseError,
 )
 
 CHECKS = []
@@ -54,6 +56,15 @@ CASES = {
     "html": (502, "<html>Bad gateway</html>"),
     "ratelimit": (429, [{"message": "Too many requests", "httpCode": "429",
                          "errorCode": "00000", "content": None, "error": None}]),
+    # real body observed live after repeated failed logins
+    "blocked": (429, [{"message": "Too many failed requests made! This account "
+                                  "has been temporarily blocked!",
+                       "httpCode": "429", "errorCode": "000016",
+                       "content": None, "error": None}]),
+    "blocked4xx": (403, [{"message": "Too many failed requests made! This account "
+                                     "has been temporarily blocked!",
+                          "httpCode": "403", "errorCode": "000016",
+                          "content": None, "error": None}]),
 }
 
 
@@ -104,9 +115,21 @@ async def main():
     check("500 -> ObloResponseError (not auth, not connect)", isinstance(err, ObloResponseError), repr(err))
     err, _ = await attempt("html")
     check("502 HTML -> ObloResponseError", isinstance(err, ObloResponseError), repr(err))
-    err, _ = await attempt("ratelimit")
-    check("429 -> ObloCloudError rate limited", isinstance(err, ObloCloudError)
-          and not isinstance(err, ObloAuthError), repr(err))
+    # rate limiting: the ACCOUNT is blocked, so a CORRECT password fails too.
+    # Must be its own class -> config flow reports it as rate_limited, never
+    # cannot_connect (which would send us chasing the network again) and never
+    # invalid_auth (which would send Andrew chasing the password).
+    err, msg = await attempt("ratelimit")
+    check("429 -> ObloRateLimitError", isinstance(err, ObloRateLimitError), repr(err))
+    check("429 is still an ObloCloudError subclass (transient, retryable)",
+          isinstance(err, ObloCloudError) and not isinstance(err, ObloAuthError), repr(err))
+    err, msg = await attempt("blocked")
+    check("429/000016 -> ObloRateLimitError", isinstance(err, ObloRateLimitError), repr(err))
+    check("429/000016 keeps the cloud's own message",
+          bool(msg) and "temporarily blocked" in str(msg).lower(), str(msg))
+    err, msg = await attempt("blocked4xx")
+    check("403/000016 -> ObloRateLimitError (not invalid_auth)",
+          isinstance(err, ObloRateLimitError) and not isinstance(err, ObloAuthError), repr(err))
 
     # genuine transport failure: connection refused = cannot_connect
     async with aiohttp.ClientSession() as session:
@@ -120,6 +143,30 @@ async def main():
         except ObloCloudError as err:
             check("connection refused -> ObloCloudError (cannot_connect)", True, str(err))
 
+    # config flow must surface the block as its OWN bucket, distinct from
+    # cannot_connect (network chase) and invalid_auth (password chase)
+    import ha_stub  # noqa: F401  (needed before config_flow import)
+    from custom_components.oblo_living.config_flow import ObloConfigFlow
+    _login_key = ObloConfigFlow._login_error_key
+    # the mapper never touches self, so a casted None is a safe stand-in
+    key = _login_key(cast(ObloConfigFlow, None), ObloRateLimitError("temporarily blocked"))
+    check("rate limit -> config flow key 'rate_limited'", key == "rate_limited", key)
+
+    # every error key the flow can return must exist in BOTH strings.json and
+    # translations/en.json - HA renders translations/, so a key missing there
+    # shows up to the user as a raw identifier like "rate_limited".
+    every_key = {_login_key(cast(ObloConfigFlow, None), e) for e in (
+        ObloAuthError("x"), ObloRateLimitError("x"), ObloResponseError("HTTP 500"),
+        ObloResponseError("weird body"), ObloCloudError("boom"),
+    )}
+    strings = json.load(open(os.path.join(COMPONENT, "strings.json")))
+    trans = json.load(open(os.path.join(COMPONENT, "translations", "en.json")))
+    for src_name, doc in (("strings.json", strings), ("translations/en.json", trans)):
+        errs = set(doc["config"]["error"])
+        missing = every_key - errs
+        check(f"{src_name} defines every flow error key", not missing, f"missing {missing}")
+    check("translations/en.json in sync with strings.json", strings == trans,
+          "files differ")
     await runner.cleanup()
 
     failed = [c for c in CHECKS if not c[1]]

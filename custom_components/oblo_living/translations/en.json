@@ -1,0 +1,34 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "OBLO Living Cloud",
+        "description": "Log in with your OBLO Living cloud account. Devices are picked up from the cloud automatically.",
+        "data": {
+          "identity": "Email or username",
+          "secret": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate OBLO Living",
+        "description": "The cloud session for {identity} expired or was rejected. Enter the password for this OBLO account to renew it.",
+        "data": {
+          "secret": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Cloud rejected these credentials (user does not exist or wrong password). Check the HA log for the exact error code.",
+      "cannot_connect": "Could not reach cloud.oblo.rs (network error or rate limited).",
+      "cloud_unavailable": "Reached cloud.oblo.rs but it answered with a server error (HTTP 5xx). The cloud service may be down.",
+      "unexpected_response": "Login answered with an unexpected response. Check the HA log for details.",
+      "missing_credentials": "Email and password are both required.",
+      "rate_limited": "The cloud temporarily blocked this account after too many failed login attempts. Even the correct password fails until the block lifts - wait about 15 minutes, confirm the password in the OBLO app or at cloud.oblo.rs, then try once.",
+      "unknown": "Unexpected error during login."
+    },
+    "abort": {
+      "already_configured": "This account is already set up.",
+      "reauth_successful": "Cloud session renewed."
+    }
+  }
+}

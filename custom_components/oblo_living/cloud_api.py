@@ -44,6 +44,11 @@ ERR_USER_NOT_FOUND = "11020"
 ERR_BAD_CREDENTIALS = "00012"
 ERR_FORCED_LOGOUT = "000622"
 ERR_SESSION_REJECTED = "00003"
+# Returned as HTTP 429 (or 4xx) after repeated failed logins: the ACCOUNT is
+# temporarily blocked, so even a CORRECT password fails until the block lifts.
+# Observed live: {"httpCode":"429","errorCode":"000016","message":"Too many
+# failed requests made! This account has been temporarily blocked..."}
+ERR_TOO_MANY_ATTEMPTS = "000016"
 
 # Codes that mean "the credentials/session are the problem", not the network.
 # The cloud answers a wrong password with HTTP 406 + 00012, and an unknown
@@ -72,6 +77,10 @@ class ObloAuthError(ObloCloudError):
 
 class ObloResponseError(ObloCloudError):
     """Cloud responded but body/header shape was unexpected (5xx, parse fail, missing fields)."""
+
+
+class ObloRateLimitError(ObloCloudError):
+    """Account temporarily blocked after too many failed attempts (429/000016)."""
 
 
 def _first_error(data):
@@ -176,8 +185,13 @@ class ObloCloudApi:
                 except ValueError:
                     data = await resp.text()
                 code, message = _first_error(data)
-                if resp.status == 429:
-                    raise ObloCloudError("rate limited by cloud (429) - wait and retry")
+                if resp.status == 429 or code == ERR_TOO_MANY_ATTEMPTS:
+                    # The account is blocked, not the network. Callers must
+                    # report this separately: a correct password also fails here.
+                    _LOGGER.warning("cloud blocked the account: status=%s code=%s msg=%s",
+                                    resp.status, code, message)
+                    raise ObloRateLimitError(
+                        message or "too many failed attempts - account temporarily blocked")
                 if code in AUTH_ERROR_CODES or resp.status in AUTH_HTTP_STATUSES:
                     _LOGGER.info("cloud auth failure: HTTP %s code=%s message=%s",
                                  resp.status, code, message)
