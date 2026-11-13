@@ -528,7 +528,10 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("OBLO evt (non-dict): %r", payload)
             return
         evt_name = payload.get("name") or payload.get("type") or "?"
-        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        # Broker may deliver flat {device_id, service_name, property_name, property_value}
+        # OR wrapped {params: {...}}. Accept both; prefer nested if it's a non-empty dict.
+        nested = payload.get("params")
+        params = nested if isinstance(nested, dict) and nested else payload
         prop = _first(params, ("propertyName", "property", "property_name", "prop"))
         if prop is None:
             # Not a property change (online status, config, ...). Keep it quiet
@@ -539,10 +542,14 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             return
         did = _first(params, ("deviceId", "device_id", "objId", "objectId", "id"))
         svc = _first(params, ("serviceName", "service", "service_name"))
-        val = _first(params, ("value", "newValue", "new_value", "val"))
+        val = _first(params, ("value", "newValue", "new_value", "val", "property_value"))
         # Alert properties are logged at INFO: they are the only live proof we
         # can get that a siren started or stopped on the gateway's own terms.
-        if str(prop).startswith("PropAlert"):
+        # Motion sensors: momentary, evt-driven, log at INFO so they're visible
+        # without DEBUG config.
+        is_motion = str(prop) in ("State", "Motion", "Occupancy") and \
+                    str(svc) in ("PirService", "pir0", "MotionDetectorService")
+        if str(prop).startswith("PropAlert") or is_motion:
             _LOGGER.info("OBLO evt %s at %s device=%s service=%s %s=%r",
                          evt_name, _stamp(), did, svc, prop, val)
         else:
@@ -552,6 +559,13 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         # gateway report. Applying it would pin the default into the overlay,
         # and _reapply_overlay would then restore it after every poll, making
         # the user's choice permanently unreachable. Log once, change nothing.
+        if val is None:
+            # An event that names a property but carries no value is not
+            # evidence of anything. Applying it would blank a good value back
+            # to Unknown, which is the exact symptom we are fixing.
+            _LOGGER.debug("OBLO evt %s device=%s service=%s %s has no value; ignored",
+                          evt_name, did, svc, prop)
+            return
         local_val = self._local_authority(did, svc, prop)
         if local_val is not None and str(val) != str(local_val):
             self._note_gateway_disagreement(did, svc, prop, val, local_val)
@@ -570,6 +584,14 @@ class ObloDataCoordinator(DataUpdateCoordinator):
 
         Returns True when something actually changed, so we only notify
         entities on a real update.
+
+        Service identity is matched in two passes. The gateway tree names a
+        service instance `pir0` while an event may name its TYPE `PirService`
+        -- comparing the two strings directly is why motion events were dropped
+        silently. Pass 1 matches the instance name exactly. Pass 2 accepts the
+        type, but only when exactly one service on the device carries it: a
+        device with two outlets would otherwise have the event applied to the
+        wrong relay, and a wrong relay is worse than a dropped event.
         """
         if did is None or prop is None:
             return False
@@ -577,15 +599,28 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         for dev in devices:
             if str(dev.get("id")) != str(did):
                 continue
-            for svc in dev.get("services") or []:
-                if svc_name is not None and str(svc.get("service")) != str(svc_name):
-                    continue
+            services = [s for s in (dev.get("services") or []) if isinstance(s, dict)]
+            if svc_name is None:
+                targets = services
+            else:
+                targets = [s for s in services
+                           if str(s.get("service")) == str(svc_name)]
+                if not targets:
+                    targets = [s for s in services
+                               if str(s.get("service_type")) == str(svc_name)]
+                    if len(targets) > 1:
+                        _LOGGER.warning(
+                            "OBLO evt: service type %s is ambiguous on device %s "
+                            "(%d instances) -- event for %s ignored",
+                            svc_name, did, len(targets), prop)
+                        return False
+            for svc in targets:
                 props = svc.get("props")
-                if not isinstance(props, dict):
+                if props is None:
                     continue
-                if str(props.get(prop)) == str(value):
+                if str(_prop_value(props, prop)) == str(value):
                     return False
-                props[prop] = value
+                _poke_props(props, prop, value)
                 return True
         return False
 
@@ -987,29 +1022,30 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         if self.ohm is None:
             return None
         check = getattr(self.ohm, "async_check_device", None)
+        bus_id = SWITCH_BUS_IDS.get(str(device_id))
         if check is not None:
             try:
-                bus_id = SWITCH_BUS_IDS.get(str(device_id))
                 await check(bus_id, device_id)
             except Exception as err:  # noqa: BLE001 - optional refresh lever
                 _LOGGER.debug(
-                    "OHM check_device failed device=%s (continuing): %s",
-                    device_id, err)
+                    "OHM check_device failed device=%s destination=%s (continuing): %s",
+                    device_id, bus_id, err)
         if settle:
             await asyncio.sleep(settle)
         ohm_svc = SWITCH_SERVICE_IDS.get(service_name, service_name)
+        dest = bus_id
         try:
             val = await self.ohm.async_get_property(
                 device_id, ohm_svc, property_name, timeout=5.0)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "OHM refresh read failed device=%s service=%s: %s",
-                device_id, ohm_svc, err)
+                "OHM refresh read failed device=%s destination=%s service=%s: %s",
+                device_id, dest, ohm_svc, err)
             return None
         if val is not None:
             _LOGGER.info(
-                "OHM refresh read device=%s service=%s property=%s -> %r",
-                device_id, ohm_svc, property_name, val)
+                "OHM refresh read device=%s destination=%s service=%s property=%s -> %r",
+                device_id, dest, ohm_svc, property_name, val)
         return val
 
     async def _resolve_missing_states(self, devices):
