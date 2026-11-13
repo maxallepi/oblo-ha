@@ -130,50 +130,27 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         rest_devices = merge_devices(normalise_devices(gateways),
                                      normalise_devices(details))
 
-        # --- v0.2.21 machine-readable uplink gate ---
-        # The cloud's own contact record is the only unambiguous uplink signal
-        # we have: the local brokers are ACL-filtered so nothing can be
-        # measured on the LAN, and MQTT 3.1.1 PUBACKs are unconditional.
-        # If lastTimeStatusUpdated stops advancing while connectionStatus
-        # still says "online", that flag is cached and the gateway's OMB
-        # tunnel is dead -- no client change can fix it.
-        # Greppable line: "UPLINK sn=... advanced=... connectionStatus=... lastTimeOnline=... lastTimeStatusUpdated=..."
-        # Throttle: log immediately on transition, or heartbeat every 10 min
-        # (avoids spamming the log with repeated advanced=False while still
-        # capturing every state change: first -> False -> True -> ...)
-        import time
-        prev = getattr(self, "_last_status", {})
-        prev_adv = getattr(self, "_last_adv", {})
-        last_log = getattr(self, "_last_uplink_log", 0.0)
-        now = time.time()
-        cur = {}
+        # --- v0.2.23: honest uplink diagnostics ---
+        # v0.2.21 called lastTimeStatusUpdated a heartbeat and inferred a dead
+        # tunnel whenever it did not move. It is NOT a heartbeat: the cloud
+        # writes it only on online<->offline transitions, so "unchanged" is the
+        # normal steady state and advanced=False was a false negative. Removed
+        # outright rather than relabelled -- a field that reads like a verdict
+        # gets read as one, and the published release note said "advance or
+        # escalate to OBLO", which was wrong.
+        # Raw values stay at DEBUG for forensics. The real liveness signal is
+        # ONLINE_EVENT (gtw_online_status_changed) from the evt stream, logged
+        # in cloud_mqtt._on_message.
         for gw in (gateways or []):
-            if not isinstance(gw, dict):
-                continue
-            sn = gw.get("serialNumber")
-            ts = gw.get("lastTimeStatusUpdated")
-            cur[sn] = ts
-            if sn not in prev:
-                adv = "first"
-            elif ts != prev.get(sn):
-                adv = "True"
-            else:
-                adv = "False"
-            if adv != prev_adv.get(sn) or (now - last_log) >= 600:
-                _LOGGER.warning(
-                    "UPLINK sn=%s advanced=%s connectionStatus=%s lastTimeOnline=%s "
-                    "lastTimeStatusUpdated=%s",
-                    sn,
-                    adv,
+            if isinstance(gw, dict):
+                _LOGGER.debug(
+                    "UPLINK sn=%s connectionStatus=%s lastTimeOnline=%s "
+                    "lastTimeStatusUpdated=%s (transition timestamp, not a heartbeat)",
+                    gw.get("serialNumber"),
                     gw.get("connectionStatus"),
                     gw.get("lastTimeOnline"),
-                    ts,
+                    gw.get("lastTimeStatusUpdated"),
                 )
-                prev_adv[sn] = adv
-                last_log = now
-        self._last_status = cur
-        self._last_adv = prev_adv
-        self._last_uplink_log = last_log
 
         # OHM over cloud MQTT is the only source that carries service_list.
         # Failure here must not break the poll -- fall back to REST data and
