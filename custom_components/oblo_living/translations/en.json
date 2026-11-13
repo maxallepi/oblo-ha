@@ -30,5 +30,67 @@
       "already_configured": "This account is already set up.",
       "reauth_successful": "Cloud session renewed."
     }
+  },
+  "services": {
+    "set_property": {
+      "name": "Set OBLO property",
+      "description": "Write one property to the gateway and confirm it by reading the value back. Raises if the gateway accepts the command but the value does not change, so a successful call means the device actually moved.",
+      "fields": {
+        "device_id": {
+          "name": "Device ID",
+          "description": "OHM device id (the `id` field from the device list)."
+        },
+        "service_name": {
+          "name": "Service name",
+          "description": "Instance alias from OHM, e.g. `outlet0` or `basic0`."
+        },
+        "property_name": {
+          "name": "Property name",
+          "description": "Property to write, e.g. `State`."
+        },
+        "property_value": {
+          "name": "Value",
+          "description": "Value to write. Relays take `1` (on) or `0` (off)."
+        },
+        "service_type": {
+          "name": "Service type",
+          "description": "Canonical OHM class, e.g. `OutletService`. Sent alongside the alias so the gateway can address the service by class."
+        },
+        "confirm_timeout": {
+          "name": "Confirmation timeout",
+          "description": "Seconds to keep reading back before the write is called unconfirmed."
+        },
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Only needed when more than one OBLO entry is loaded."
+        }
+      }
+    },
+    "get_property": {
+      "name": "Get OBLO property",
+      "description": "Read one property straight from the gateway, bypassing the cached coordinator state. Use it to check a write independently.",
+      "fields": {
+        "device_id": {
+          "name": "Device ID",
+          "description": "OHM device id (the `id` field from the device list)."
+        },
+        "service_name": {
+          "name": "Service name",
+          "description": "Instance alias from OHM, e.g. `outlet0` or `basic0`."
+        },
+        "property_name": {
+          "name": "Property name",
+          "description": "Property to write, e.g. `State`."
+        },
+        "service_type": {
+          "name": "Service type",
+          "description": "Canonical OHM class, e.g. `OutletService`. Sent alongside the alias so the gateway can address the service by class."
+        },
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Only needed when more than one OBLO entry is loaded."
+        }
+      }
+    }
   }
 }

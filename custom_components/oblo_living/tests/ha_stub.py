@@ -36,10 +36,15 @@ def install():
     class ConfigEntryAuthFailed(Exception):
         pass
 
+    class HomeAssistantError(Exception):
+        pass
+
     exc.ConfigEntryAuthFailed = ConfigEntryAuthFailed
+    exc.HomeAssistantError = HomeAssistantError
 
     core = _mod("homeassistant.core")
     core.HomeAssistant = MagicMock
+    core.SupportsResponse = type("SupportsResponse", (), {"OPTIONAL": "optional"})()
     core.callback = lambda f: f
 
     helpers = _mod("homeassistant.helpers", package=True)
@@ -128,6 +133,26 @@ def install():
     bs_mod.BinarySensorEntity = BinarySensorEntity
     bs_mod.BinarySensorDeviceClass = BinarySensorDeviceClass
 
+    # switch platform
+    sw_mod = _mod("homeassistant.components.switch", package=True)
+
+    class SwitchEntity:
+        _attr_name = None
+        _attr_unique_id = None
+        _attr_should_poll = True
+
+        @property
+        def is_on(self):
+            raise NotImplementedError
+
+        async def async_turn_on(self, **kwargs):
+            raise NotImplementedError
+
+        async def async_turn_off(self, **kwargs):
+            raise NotImplementedError
+
+    sw_mod.SwitchEntity = SwitchEntity
+
     # const units
     const_mod = _mod("homeassistant.const")
     const_mod.PERCENTAGE = "%"
@@ -146,5 +171,6 @@ def install():
     ha.components = _mod("homeassistant.components", package=True)
     ha.components.sensor = sensor_mod
     ha.components.binary_sensor = bs_mod
+    ha.components.switch = sw_mod
 
 install()

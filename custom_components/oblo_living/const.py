@@ -13,6 +13,17 @@ CONF_USERNAME = "username"      # cli/<username> for cloud MQTT
 CONF_GROUPS = "groups"          # ["admin"] -> admin OHM path
 SCAN_INTERVAL_S = 60
 
+# -- control path -----------------------------------------------------------
+# Values sent as set_service_property_value(property_value=...). The gateway
+# stores every property as TEXT in ohm.db, so these are strings. Whether it
+# wants "1"/"0" or an int is the one thing a live write has to settle; both
+# live here so a single edit flips the whole control path.
+OHM_STATE_ON = "1"
+OHM_STATE_OFF = "0"
+# How long a write waits for a matching read-back before it is called
+# unconfirmed. PUBACK and code:0 prove nothing on this broker.
+OHM_CONFIRM_TIMEOUT_S = 2.0
+
 # -- local mode (paused; kept for fallback) ---------------------------------
 CONF_GATEWAY_SN = "gateway_sn"
 CONF_CLIENT_TAG = "client_tag"

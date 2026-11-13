@@ -10,9 +10,10 @@ from .cloud_api import ObloCloudApi, ObloCloudError
 from .cloud_mqtt import ObloCloudMqtt
 from .coordinator import ObloDataCoordinator
 from .hub import ObloHub
+from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = ["binary_sensor", "sensor"]  # switch/light need the cloud command API (not yet)
+PLATFORMS = ["binary_sensor", "sensor", "switch"]
 
 
 def _pick_gateway_identity(raw_gateways, api):
@@ -170,6 +171,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await async_register_services(hass)
     return True
 
 

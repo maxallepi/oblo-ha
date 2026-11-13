@@ -1,0 +1,97 @@
+set_property:
+  name: Set OBLO property
+  description: >-
+    Write one property to the gateway and confirm it by reading the value
+    back. Raises if the gateway accepts the command but the value does not
+    change, so a successful call means the device actually moved.
+  fields:
+    device_id:
+      name: Device ID
+      description: OHM device id (the `id` field from the device list).
+      required: true
+      example: 5f2c1b9e8d3a4c0012ab34cd
+      selector:
+        text:
+    service_name:
+      name: Service name
+      description: Instance alias from OHM, e.g. `outlet0` or `basic0`.
+      required: true
+      example: outlet0
+      selector:
+        text:
+    property_name:
+      name: Property name
+      description: Property to write, e.g. `State`.
+      required: true
+      example: State
+      selector:
+        text:
+    property_value:
+      name: Value
+      description: Value to write. Relays take `1` (on) or `0` (off).
+      required: true
+      example: "1"
+      selector:
+        text:
+    service_type:
+      name: Service type
+      description: >-
+        Canonical OHM class, e.g. `OutletService`. Sent alongside the alias so
+        the gateway can address the service by class.
+      required: false
+      example: OutletService
+      selector:
+        text:
+    confirm_timeout:
+      name: Confirmation timeout
+      description: Seconds to keep reading back before the write is called unconfirmed.
+      required: false
+      default: 2.0
+      selector:
+        number:
+          min: 0
+          max: 30
+          step: 0.5
+          unit_of_measurement: s
+    entry_id:
+      name: Config entry
+      description: Only needed when more than one OBLO entry is loaded.
+      required: false
+      selector:
+        text:
+
+get_property:
+  name: Get OBLO property
+  description: >-
+    Read one property straight from the gateway, bypassing the cached
+    coordinator state. Use it to check a write independently.
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      example: 5f2c1b9e8d3a4c0012ab34cd
+      selector:
+        text:
+    service_name:
+      name: Service name
+      required: true
+      example: outlet0
+      selector:
+        text:
+    property_name:
+      name: Property name
+      required: true
+      example: State
+      selector:
+        text:
+    service_type:
+      name: Service type
+      required: false
+      example: OutletService
+      selector:
+        text:
+    entry_id:
+      name: Config entry
+      required: false
+      selector:
+        text:

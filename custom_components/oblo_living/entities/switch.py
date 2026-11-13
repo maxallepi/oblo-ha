@@ -1,27 +1,69 @@
-"Switch entity for OBLO relay/outlet devices."
+"""Switch entity for OBLO relay/outlet devices.
+
+Built from the coordinator data (not the legacy local hub). Uses the OHM
+command path with mandatory read-back confirmation.
+"""
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from ..entity_map import entity_name, read_prop
+from ..const import OHM_STATE_ON, OHM_STATE_OFF, OHM_CONFIRM_TIMEOUT_S
 
 
-class ObloSwitch(SwitchEntity):
-    """Maps basic0/outlet0 to on/off."""
+class ObloSwitch(CoordinatorEntity, SwitchEntity):
+    """Maps OutletService/outlet0/BasicService/basic0 to on/off."""
 
-    def __init__(self, hub, device, service_name):
-        self._hub, self._device = hub, device
-        self._service = service_name
-        self._attr_name = f"{device.name} {service_name}"
-        self._attr_unique_id = f"oblo_{device.device_id}_{service_name}"
+    def __init__(self, coordinator, ent):
+        super().__init__(coordinator)
+        self._ent = ent
+        self._attr_name = entity_name(ent["name"], ent["service"])
+        self._attr_unique_id = ent["unique_id"]
+        self._attr_should_poll = False
+
+    def _service(self):
+        """Find this entity's service dict in the latest coordinator data."""
+        did = self._ent["device_id"]
+        for dev in (self.coordinator.data or []):
+            if dev.get("id") != did:
+                continue
+            for svc in dev.get("services") or []:
+                if svc.get("service") == self._ent["service"]:
+                    return svc
+        return None
 
     @property
     def is_on(self):
-        val = self._device.properties.get(self._service, {}).get("On")
-        if val is None:
-            val = self._device.properties.get(self._service, {}).get("State")
+        svc = self._service()
+        if svc is None:
+            return False
+        prop = self._ent.get("value_prop") or "State"
+        val = read_prop(svc, prop)
         if val is None:
             return False
-        return str(val).lower() in ("1", "true", "yes", "on")
+        s = str(val).strip().lower()
+        return s in ("1", "true", "on", "yes")
+
+    @property
+    def available(self):
+        """Only available when OHM is connected and the service still exists."""
+        return self.coordinator.ohm is not None and self._service() is not None
 
     async def async_turn_on(self, **kwargs):
-        self._hub.publish(self._device.device_id, self._service, "On", True)
+        await self._async_set(OHM_STATE_ON)
 
     async def async_turn_off(self, **kwargs):
-        self._hub.publish(self._device.device_id, self._service, "On", False)
+        await self._async_set(OHM_STATE_OFF)
+
+    async def _async_set(self, value):
+        did = self._ent["device_id"]
+        svc_name = self._ent["service"]
+        prop = self._ent.get("value_prop") or "State"
+        svc_type = self._ent.get("service_type")
+        res = await self.coordinator.async_write_service_property(
+            did, svc_name, prop, value, service_type=svc_type,
+            confirm_timeout=OHM_CONFIRM_TIMEOUT_S)
+        if not res.get("confirmed"):
+            reason = res.get("error") or "value unchanged"
+            raise HomeAssistantError(
+                f"OHM write unconfirmed: {reason}")

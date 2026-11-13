@@ -260,6 +260,11 @@ def build_entities(devices):
                 # prop name the state lives in -- the entity reads this key
                 "value_prop": prop,
                 "state": state,
+                # canonical OHM type (e.g. "OutletService") when the source had
+                # one. Write commands send it alongside the instance alias so
+                # the gateway can address the service by class as well. None
+                # for REST-sourced devices, which never expose a type.
+                "service_type": svc.get("service_type"),
                 "unique_id": f"oblo_{dev['id']}_{name}",
             })
     return out

@@ -1,5 +1,7 @@
 """Data update coordinator for the OBLO cloud mode."""
+import asyncio
 import logging
+import time
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -32,6 +34,38 @@ def diag_shape(payload):
         "has_devices": isinstance(first.get("devices"), list),
         "device_count": len(first.get("devices") or []),
     }
+
+
+_TRUE = {"1", "true", "on", "yes"}
+_FALSE = {"0", "false", "off", "no"}
+
+
+def _norm_boolish(v):
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in _TRUE:
+        return True
+    if s in _FALSE:
+        return False
+    return None
+
+
+def values_match(sent, readback):
+    """Loose equality for gateway values.
+
+    Gateway stores all properties as TEXT in ohm.db. A switch may come back as
+    "1", "true", "on", 1, or True. Treat them as equivalent.
+    """
+    if str(sent).strip() == str(readback).strip():
+        return True
+    a, b = _norm_boolish(sent), _norm_boolish(readback)
+    if a is not None and b is not None:
+        return a == b
+    try:
+        return float(sent) == float(readback)
+    except (TypeError, ValueError):
+        return False
 
 
 def normalise_ohm_objects(ohm_objects):
@@ -128,6 +162,128 @@ class ObloDataCoordinator(DataUpdateCoordinator):
     def set_ohm_client(self, client):
         """Attach the cloud MQTT/OHM client (or None to disable)."""
         self.ohm = client
+
+    # ── control path ────────────────────────────────────────────────────
+    # PUBACK proves nothing on this broker (ACKs are unconditional and ACLs
+    # filter silently), and a `code: 0` reply only means the gateway ACCEPTED
+    # a command. So a write is never reported as success on the strength of
+    # the reply alone -- it is confirmed by reading the property back.
+
+    async def async_read_service_property(self, device_id, service_name,
+                                          property_name, service_type=None,
+                                          timeout=None):
+        """Read one property straight from the gateway (bypasses the cache)."""
+        if self.ohm is None:
+            raise ObloCloudError("OHM client not attached")
+        return await self.ohm.async_get_property(
+            device_id, service_name, property_name,
+            service_type=service_type, timeout=timeout)
+
+    async def async_write_service_property(self, device_id, service_name,
+                                           property_name, value,
+                                           service_type=None,
+                                           confirm_timeout=2.0):
+        """Write one property, then confirm it by read-back.
+
+        Returns {"sent", "readback", "confirmed", "error"} where `confirmed`
+        is True only when a read-back matched the sent value, False when the
+        gateway answered but the value did not change, and None when the
+        read-back itself failed (unknown -- never claim success on unknown).
+        """
+        result = {"sent": value, "readback": None, "confirmed": None,
+                  "error": None}
+        if self.ohm is None:
+            result["error"] = "OHM client not attached (REST-only mode)"
+            _LOGGER.warning("OHM write unavailable: %s", result["error"])
+            return result
+
+        try:
+            await self.ohm.async_set_property(
+                device_id, service_name, property_name, value,
+                service_type=service_type)
+        except ObloCommandError as err:
+            # The gateway considered and refused it. Not an auth problem, and
+            # retrying risks double-actuation.
+            result["confirmed"] = False
+            result["error"] = f"refused: {err}"
+            _LOGGER.warning(
+                "OHM refused the write device=%s service=%s property=%s: %s",
+                device_id, service_name, property_name, err)
+            return result
+        except Exception as err:  # noqa: BLE001 - transport noise, never auth
+            result["error"] = f"send failed: {err}"
+            _LOGGER.warning(
+                "OHM write failed device=%s service=%s property=%s: %s",
+                device_id, service_name, property_name, err)
+            return result
+
+        # Read back until it matches or the window closes. A device that
+        # acknowledges instantly but reports the old value is a silent no-op,
+        # which is the failure mode a bare "command accepted" log would hide.
+        deadline = time.monotonic() + max(0.0, confirm_timeout)
+        read_err = None
+        while True:
+            budget = deadline - time.monotonic()
+            try:
+                result["readback"] = await self.ohm.async_get_property(
+                    device_id, service_name, property_name,
+                    service_type=service_type,
+                    timeout=max(0.5, min(2.0, budget)) if budget else 0.5)
+                read_err = None
+            except Exception as err:  # noqa: BLE001
+                read_err = err
+            if read_err is None and values_match(value, result["readback"]):
+                result["confirmed"] = True
+                break
+            if time.monotonic() >= deadline:
+                result["confirmed"] = False if read_err is None else None
+                break
+            await asyncio.sleep(0.25)
+
+        if result["confirmed"]:
+            _LOGGER.info(
+                "OHM write confirmed device=%s service=%s property=%s "
+                "value=%r readback=%r",
+                device_id, service_name, property_name, value,
+                result["readback"])
+            self._poke_device(device_id, service_name, property_name,
+                              result["readback"])
+        elif result["confirmed"] is False:
+            _LOGGER.warning(
+                "OHM write unconfirmed device=%s service=%s property=%s "
+                "sent=%r readback=%r (gateway answered, value unchanged)",
+                device_id, service_name, property_name, value,
+                result["readback"])
+        else:
+            _LOGGER.warning(
+                "OHM write unconfirmed device=%s service=%s property=%s "
+                "sent=%r (read-back failed: %s)",
+                device_id, service_name, property_name, value, read_err)
+            result["error"] = f"read-back failed: {read_err}"
+        return result
+
+    def _poke_device(self, device_id, service_name, property_name, value):
+        """Update the cached device list so the UI flips without waiting a poll."""
+        for dev in self.devices or []:
+            if dev.get("id") != device_id:
+                continue
+            for svc in dev.get("services") or []:
+                if svc.get("service") != service_name:
+                    continue
+                props = svc.get("props")
+                if isinstance(props, dict):
+                    props[property_name] = value
+                elif isinstance(props, list):
+                    for i, pair in enumerate(props):
+                        if (isinstance(pair, (list, tuple)) and pair
+                                and str(pair[0]).lower() == property_name.lower()):
+                            props[i] = [pair[0], value]
+                            break
+                    else:
+                        props.append([property_name, value])
+                self.data = list(self.devices)
+                return True
+        return False
 
     async def _async_refresh_relogin(self):
         """Refresh after re-authentication once."""
