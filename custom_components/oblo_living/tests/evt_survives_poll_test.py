@@ -151,6 +151,35 @@ async def scenario_confirmed_write_survives_poll():
     return after_poke, after_poll
 
 
+async def scenario_fresher_poll_replaces_overlay():
+    """A poll value must REPLACE the remembered one, not just win for a moment.
+
+    evt true -> poll says false (gateway changed) -> next poll omits the
+    property. The remembered value must be the poll's false, otherwise the
+    overlay resurrects a stale true -- worse than unknown, because it is wrong.
+    """
+    c = mk()
+    await c._async_fetch()
+    c.data = list(c.devices)
+    c.handle_event({"name": "device_property_changed",
+                    "params": {"deviceId": "1052", "serviceName": "outlet0",
+                               "propertyName": "State", "value": "true"}})
+    with_false = [{
+        "id": "1052", "device_name": "Hallway Lights",
+        "service_list": [{"name": "outlet0", "type": "OutletService",
+                          "property_list": [{"name": "DeviceType", "value": "16"},
+                                            {"name": "State", "value": "false"}]}],
+    }]
+    c.ohm = FakeOhm(with_false)
+    await c._async_fetch()
+    c.data = list(c.devices)
+    seen_false = state_of(c)
+    c.ohm = FakeOhm()          # back to a payload that omits State
+    await c._async_fetch()
+    c.data = list(c.devices)
+    return seen_false, state_of(c)
+
+
 base, after_evt, after_poll = asyncio.run(scenario_poll_keeps_evt())
 check("baseline before evt is unknown", base is None, f"base={base!r}")
 check("evt sets state to 'true'", after_evt == "true", f"after_evt={after_evt!r}")
@@ -169,6 +198,13 @@ after_poke, after_poll2 = asyncio.run(scenario_confirmed_write_survives_poll())
 check("confirmed write flips state", after_poke == "true", f"after_poke={after_poke!r}")
 check("confirmed write survives next poll", after_poll2 == "true",
       f"after_poll={after_poll2!r} (poll discarded the confirmed read-back)")
+
+seen_false, after_omit = asyncio.run(scenario_fresher_poll_replaces_overlay())
+check("a fresher poll value is presented", seen_false == "false",
+      f"got {seen_false!r}")
+check("a fresher poll value replaces the remembered one (no resurrection)",
+      after_omit == "false",
+      f"got {after_omit!r} - a poll that omitted State resurrected the old evt value")
 
 print("\n--- SUMMARY ---")
 total = len(CHECKS)

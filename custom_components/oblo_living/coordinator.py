@@ -595,28 +595,7 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         # not "value cleared" -- and a present one always wins, because it is
         # fresher than anything we remembered.
         if self._overlay():
-            applied = 0
-            for dev in self.devices or []:
-                for svc in dev.get("services") or []:
-                    remembered = self._overlay().get(
-                        (str(dev.get("id")), str(svc.get("service"))))
-                    if not remembered:
-                        continue
-                    props = svc.get("props")
-                    if isinstance(props, dict):
-                        for prop_name, value in remembered.items():
-                            if prop_name not in props:
-                                props[prop_name] = value
-                                applied += 1
-                    elif isinstance(props, list):
-                        for prop_name, value in remembered.items():
-                            for pair in props:
-                                if (isinstance(pair, (list, tuple)) and pair
-                                        and str(pair[0]).lower() == prop_name.lower()):
-                                    break
-                            else:
-                                props.append([prop_name, value])
-                                applied += 1
+            applied = self._reapply_overlay()
             if applied:
                 _LOGGER.debug("OBLO poll kept %d evt-confirmed value(s)", applied)
 
@@ -646,6 +625,52 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("DIAG summary failed: %s", e)
 
         return self.devices
+
+    def _reapply_overlay(self) -> int:
+        """Re-apply overlay for missing props; refresh remembered for present ones.
+
+        For each remembered (device, service, property):
+          - if the poll payload DOES carry the property: update remembered to
+            the payload value (gateway's freshest word) and do NOT count as
+            an overlay application.
+          - if the payload OMITS the property: write the remembered value back
+            and count it.
+
+        This keeps the overlay invariant: "last value the gateway itself reported"
+        — whether via live evt or a poll that included it.
+        """
+        applied = 0
+        for dev in self.devices or []:
+            for svc in dev.get("services") or []:
+                key = (str(dev.get("id")), str(svc.get("service")))
+                remembered = self._overlay().get(key)
+                if not remembered:
+                    continue
+                props = svc.get("props")
+                if isinstance(props, dict):
+                    # Build case-insensitive map of payload props
+                    current = {str(k).lower(): k for k in props}
+                    for name, value in list(remembered.items()):
+                        k = current.get(name.lower())
+                        if k is None:
+                            props[name] = value
+                            applied += 1
+                        else:
+                            remembered[name] = props[k]
+                elif isinstance(props, list):
+                    for name, value in list(remembered.items()):
+                        found = None
+                        for pair in props:
+                            if (isinstance(pair, (list, tuple)) and len(pair) >= 2
+                                    and str(pair[0]).lower() == name.lower()):
+                                found = pair
+                                break
+                        if found is None:
+                            props.append([name, value])
+                            applied += 1
+                        else:
+                            remembered[name] = found[1]
+        return applied
 
     async def _async_update_data(self):
         try:
