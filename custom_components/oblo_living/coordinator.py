@@ -725,6 +725,14 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                     len(self.devices),
                     sum(len(d.get("services", [])) for d in self.devices),
                     len(svc_names), len(entities), sorted(svc_names)[:30])
+                # Which class each device ended up with after the merge. This
+                # is the difference between the device page reading "On/Off
+                # Relay" (class survived from the REST list) and "Smart Relay"
+                # (only the OHM marker arrived, so the label falls back to
+                # service primacy). Model names are not secrets.
+                _LOGGER.warning(
+                    "DIAG merged classes: %s",
+                    {str(d.get("id")): d.get("class") for d in self.devices})
 
                 # Property NAMES (never values) for every service that has a
                 # writable entity behind it. Answers, once per install and
