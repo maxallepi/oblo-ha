@@ -102,6 +102,49 @@ _DIALECTS = (
 )
 _DEFAULT_ON, _DEFAULT_OFF = "true", "false"
 
+# OutletService/BasicService are the canonical OHM service names that map to
+# switches. The OHM service_id used by the gateway for targeted reads is
+# "outlet0"/"basic0" (see entity_map.py SERVICE_TO_OHM and entity_map).
+SWITCH_SERVICE_IDS = {
+    "OutletService": "outlet0",
+    "BasicService": "basic0",
+}
+
+# Z-Wave bus id per device, when known. Absent -> the app's "OnvifIpBus"
+# fallback, which is what it sends for a gateway-attached device.
+SWITCH_BUS_IDS: dict = {}
+
+
+def _prop_value(props, key):
+    """Read a property from dict or list-of-pairs, case-insensitive."""
+    if not props:
+        return None
+    if isinstance(props, dict):
+        if key in props:
+            return props[key]
+        for k, v in props.items():
+            if str(k).lower() == str(key).lower():
+                return v
+        return None
+    # list of [k, v] pairs
+    for pair in props:
+        if isinstance(pair, (list, tuple)) and pair and str(pair[0]).lower() == str(key).lower():
+            return pair[1]
+    return None
+
+
+def _poke_props(props, key, value):
+    """Write a property into dict or list-of-pairs, case-insensitive."""
+    if isinstance(props, dict):
+        props[key] = value
+        return
+    # list of [k, v] pairs
+    for i, pair in enumerate(props):
+        if isinstance(pair, (list, tuple)) and pair and str(pair[0]).lower() == str(key).lower():
+            props[i] = [pair[0], value]
+            return
+    props.append([key, value])
+
 
 def write_token_for(current, want_on):
     """Return the on/off token in the same dialect as `current`.
@@ -289,6 +332,8 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         #   await client.async_object_list() -> list of OHM objects
         #   await client.async_close()
         self.ohm = None
+        # One-shot: have we spent the targeted State reads for this session?
+        self._states_resolved = False
         # key -> coroutine function that undoes an in-flight actuation
         self._alert_stoppers = {}
         # key -> monotonic press generation. A Silence press bumps the
@@ -411,6 +456,8 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             # session may be a restarted gateway with a different stored type,
             # so not trusting it is the only honest option.
             self.forget_local_writes()
+            # A new session may have new state to discover.
+            self._states_resolved = False
         self.ohm = client
 
     def set_scan_interval(self, seconds):
@@ -686,6 +733,10 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             result["error"] = f"read-back failed: {read_err}"
         return result
 
+    def poke_property(self, device_id, service_name, property_name, value):
+        """Public alias for _poke_device: the gateway just told us this value."""
+        return self._poke_device(device_id, service_name, property_name, value)
+
     def _poke_device(self, device_id, service_name, property_name, value):
         """Update the cached device list so the UI flips without waiting a poll.
 
@@ -819,6 +870,14 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         # back empty would assign [] as truth. Keep the last good list instead
         # and say why, so the next failure is diagnosable from the log alone.
         fresh = merge_devices(rest_devices, ohm_devices)
+
+        # One-shot targeted read for switch services whose State the poll omits.
+        # This runs once per OHM session, before the cache is published, so the
+        # entities' first read sees gateway truth where available. A value that
+        # returns is real; nothing back -> nothing invented (Unknown is honest).
+        if self.ohm is not None and fresh:
+            await self._resolve_missing_states(fresh)
+
         if fresh:
             self.devices = fresh
         elif self.devices:
@@ -910,6 +969,103 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("DIAG summary failed: %s", e)
 
         return self.devices
+
+    async def async_refresh_state(self, device_id, service_name, property_name,
+                                  settle=0.6):
+        """Ask the gateway to re-poll one device, then read the property once.
+
+        The app's device page has a "check status" button that publishes
+        `check_device` (type=service_command) and then re-reads the property.
+        That is the only way to obtain gateway truth for a property the poll
+        omits without waiting for the next scheduled refresh -- and it is a
+        refresh, not a guess: nothing is returned unless the gateway answers.
+
+        Best-effort by design. A gateway that ignores `check_device` must not
+        turn a completed write into an error, so every failure here returns
+        None and the caller falls back to its remembered value.
+        """
+        if self.ohm is None:
+            return None
+        check = getattr(self.ohm, "async_check_device", None)
+        if check is not None:
+            try:
+                bus_id = SWITCH_BUS_IDS.get(str(device_id))
+                await check(bus_id, device_id)
+            except Exception as err:  # noqa: BLE001 - optional refresh lever
+                _LOGGER.debug(
+                    "OHM check_device failed device=%s (continuing): %s",
+                    device_id, err)
+        if settle:
+            await asyncio.sleep(settle)
+        ohm_svc = SWITCH_SERVICE_IDS.get(service_name, service_name)
+        try:
+            val = await self.ohm.async_get_property(
+                device_id, ohm_svc, property_name, timeout=5.0)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "OHM refresh read failed device=%s service=%s: %s",
+                device_id, ohm_svc, err)
+            return None
+        if val is not None:
+            _LOGGER.info(
+                "OHM refresh read device=%s service=%s property=%s -> %r",
+                device_id, ohm_svc, property_name, val)
+        return val
+
+    async def _resolve_missing_states(self, devices):
+        """One targeted read for switch services whose State the poll omits.
+
+        The poll is a snapshot of what the gateway persists. For a relay it may
+        carry no `State` row at all, which leaves the card with no truth source
+        after a restart: nothing remembered, nothing polled. A targeted read is
+        the only primitive that can recover it, and it is already proven -- the
+        same `get_service_property_value` call the write path uses to confirm.
+
+        Runs once per OHM session, for at most SWITCH_STATE_SERVICES x devices
+        round trips, because this account has already been rate-limited once.
+        A value that comes back is real and is written into the poll result, so
+        entities see gateway truth. Nothing back -> nothing invented.
+        """
+        if self._states_resolved:
+            return 0
+        if self.ohm is None or not devices:
+            return 0
+        self._states_resolved = True
+
+        resolved = 0
+        for dev in devices:
+            did = dev.get("id")
+            if did is None:
+                continue
+            for svc in dev.get("services") or []:
+                ohm_svc = SWITCH_SERVICE_IDS.get(svc.get("service"))
+                if ohm_svc is None:
+                    continue
+                props = svc.get("props")
+                if _prop_value(props, "State") is not None:
+                    continue  # poll already answers; do not spend a round trip
+                try:
+                    val = await self.ohm.async_get_property(
+                        did, ohm_svc, "State", timeout=5.0)
+                except Exception as err:  # noqa: BLE001 - one read must not break the poll
+                    _LOGGER.debug(
+                        "OHM targeted State read failed device=%s service=%s: %s",
+                        did, ohm_svc, err)
+                    continue
+                if val is None:
+                    _LOGGER.info(
+                        "OHM targeted State read returned nothing device=%s "
+                        "service=%s -- entity stays unknown (honest)", did, ohm_svc)
+                    continue
+                _poke_props(props, "State", val)
+                resolved += 1
+                _LOGGER.info(
+                    "OHM targeted State read device=%s service=%s -> %r",
+                    did, ohm_svc, val)
+        if resolved:
+            _LOGGER.info("OBLO resolved %d switch state(s) by targeted read",
+                         resolved)
+        return resolved
 
     def _reapply_overlay(self) -> int:
         """Re-apply overlay for missing props; refresh remembered for present ones.

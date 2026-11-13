@@ -53,10 +53,11 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
         prop = self._ent.get("value_prop") or "State"
         val = read_prop_strict(svc, prop) if svc is not None else None
         if val is None:
-            # No poll row for this property (a relay in ohm.db carries only
-            # DeviceType). Fall back to what WE last asked for -- the gateway
-            # never reports State, so a remembered write is the only truth
-            # available. A poll value always wins when one exists.
+            # No poll row for this property on this device. The poll may omit
+            # State entirely (ohm.db carries only DeviceType for a relay), or it
+            # may include it. Fall back to what WE last asked for -- a remembered
+            # write is the only truth available when the poll is silent. A poll
+            # value always wins when one exists.
             val = self.coordinator.local_write(did, svc_name, prop)
         if val is None:
             # Report UNKNOWN, not off. Claiming "off" would be a lie in the one
@@ -97,11 +98,19 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
         if not res.get("confirmed"):
             if not res.get("observed"):
                 # The command went out and no read-back ever returned a value
-                # for this property -- unobservable, not refused. Remember what
-                # we asked for so the UI flips now and stays honest until a
-                # poll carries State. (`observed`, not `readback is None`: the
-                # retry loop's last timed-out read overwrites an earlier real
-                # answer with None.)
+                # for this property. Before falling back to memory, spend one
+                # refresh: ask the gateway to re-poll the device, then read the
+                # property once. That is the app's own "check status" path, and
+                # it is the only recovery that survives a restart or a wall
+                # switch flip -- memory alone cannot see either. (`observed`,
+                # not `readback is None`: the retry loop's last timed-out read
+                # overwrites an earlier real answer with None.)
+                fresh = await self.coordinator.async_refresh_state(
+                    did, svc_name, prop)
+                if fresh is not None:
+                    self.coordinator.poke_property(did, svc_name, prop, fresh)
+                    self.coordinator.push_local_update()
+                    return
                 self.coordinator.remember_local_write(did, svc_name, prop, value)
                 self.coordinator.push_local_update()
                 return

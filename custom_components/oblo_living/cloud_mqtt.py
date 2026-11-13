@@ -391,6 +391,31 @@ class ObloCloudMqtt:
             timeout=timeout, describe="OHM set_property",
         )
 
+    async def async_check_device(
+        self,
+        bus_id: Any,
+        device_id: Any,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Ask the gateway to poll a device for fresh state (app's 'check status').
+
+        Mirrors the bundle exactly: `i = a && a > -1 ? a : "OnvifIpBus"` -- a
+        bus_id of 0 is a real bus, so it must not collapse into the fallback.
+        `type` is "service_command", not the "command" every other OHM verb
+        uses, and that difference is the only reason this takes a spike.
+        """
+        dest = bus_id if isinstance(bus_id, int) and bus_id > -1 else "OnvifIpBus"
+        params = {
+            "service_name": "BusService",
+            "destination": dest,
+            "params": {"device_id": device_id},
+        }
+        return await self._async_command(
+            "check_device", params,
+            timeout=timeout, msg_type="service_command",
+            describe="OHM check_device",
+        )
+
     async def async_subscribe_events(self, callback: Callable[[Dict], None]) -> None:
         """Subscribe to gateway events for live device property changes."""
         if self._evt_cb is not None:
