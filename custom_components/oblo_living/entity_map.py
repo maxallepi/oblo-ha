@@ -395,13 +395,78 @@ def read_prop(svc, prop):
         for key, val in props.items():
             if key.lower() == str(prop).lower():
                 return val
+    # Fallback candidates for value-like properties. Power/metering names are
+    # included so a sensor declared as "Power" still reads a gateway that
+    # reports the same quantity as ActivePower / PowerConsumption / Watt.
     for key, val in props.items():
         if key.lower() in ("state", "value", "level", "intensity", "detected",
-                           "activated", "status", "category", "type"):
+                           "activated", "status", "category", "type",
+                           "power", "activepower", "powerconsumption", "watt",
+                           "energy", "instantaneouspower"):
             return val
     for val in props.values():
         return val
     return None
+
+
+# ── Power sensor: resolve the property name that actually carries the value.
+# The OBLO app's own catalog defines exactly ONE property for OutletService
+# ("State") and has no power/metering service at all, so a "Power" sensor is
+# our addition, not app parity. Gateways that do meter report the value under
+# their own key. Assuming "Power" made the entity permanent-Unknown while the
+# number sat in the tree under another name.
+POWER_PROP_CANDIDATES = (
+    "Power", "ActivePower", "PowerConsumption", "Watt", "W",
+    "Value", "Energy", "InstantaneousPower", "InstantPower",
+)
+POWER_SERVICES = {"power0", "PowerConsumptionService"}
+
+
+def props_as_map(svc):
+    """{lower_key: (original_key, value)} for a service's props."""
+    out = {}
+    props = svc.get("props")
+    if isinstance(props, dict):
+        for k, v in props.items():
+            out[str(k).lower()] = (str(k), v)
+    elif isinstance(props, list):
+        for pair in props:
+            if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                out[str(pair[0]).lower()] = (str(pair[0]), pair[1])
+    return out
+
+
+def _is_number(val):
+    try:
+        float(val)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def resolve_power_prop(svc, declared_prop):
+    """Return the property name that actually carries the power value.
+
+    Tiers: declared key (exact/case-insensitive) -> power candidates ->
+    the single numeric property if there is exactly one. Returns declared_prop
+    when nothing better is found, so the entity keeps its declared key rather
+    than pointing at an unrelated field.
+    """
+    if declared_prop is None:
+        return None
+    m = props_as_map(svc)
+    if not m:
+        return declared_prop
+    dl = str(declared_prop).lower()
+    if dl in m:
+        return m[dl][0]
+    for cand in POWER_PROP_CANDIDATES:
+        if cand.lower() in m:
+            return m[cand.lower()][0]
+    nums = [(orig, val) for (orig, val) in m.values() if _is_number(val)]
+    if len(nums) == 1:
+        return nums[0][0]
+    return declared_prop
 
 
 # ── Device registry metadata ────────────────────────────────────────────
@@ -705,8 +770,21 @@ def build_entities(devices):
                     continue
             platform, dclass, unit, prop = SERVICE_MAP[name]
             seen.add(canon)
+            # Power services: use the property the gateway actually carries
+            # rather than the declared guess ("Power"). A meter that reports
+            # ActivePower would otherwise create an entity that reads a key
+            # that never exists -> permanent Unknown.
+            if canon in POWER_SERVICES or name in POWER_SERVICES:
+                prop = resolve_power_prop(svc, prop)
             props = dict(svc.get("props") or [])
             state = props.get(prop) if prop else None
+            if state is None and prop is not None:
+                # Case-insensitive read: the cloud changes property casing
+                # between endpoints (see read_prop).
+                for key, val in props.items():
+                    if str(key).lower() == str(prop).lower():
+                        state = val
+                        break
             out.append({
                 "device_id": dev["id"],
                 "class": dev["class"],
