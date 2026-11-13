@@ -85,6 +85,7 @@ class FakeMqtt:
         self.connected = False
         self.closed = False
         self.connect_error = None
+        self._mid = 0
         FakeMqtt.instances.append(self)
 
     async def async_connect(self):
@@ -94,6 +95,8 @@ class FakeMqtt:
 
     async def async_subscribe_events(self, callback):
         self.evt_cb = callback
+        self._mid += 1
+        return (0, self._mid)
 
     async def async_close(self):
         self.closed = True

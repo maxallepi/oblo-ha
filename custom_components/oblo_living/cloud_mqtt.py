@@ -91,6 +91,13 @@ class ObloCloudMqtt:
         # event callback
         self._evt_cb: Optional[Callable[[Dict], None]] = None
 
+        # SUBACK correlation: mid -> topic. on_subscribe hands us a mid and
+        # the granted codes but never the topic, so without this map the log
+        # says "granted (1,)" without saying what was granted -- and a SUBACK
+        # of 0x80 is the one line that tells a user their silence is a refusal.
+        self._sub_mid_topic: Dict[int, str] = {}
+        self._sub_granted: Dict[str, Any] = {}
+
     # ------------------------------------------------------------------ #
     # Public async API
     # ------------------------------------------------------------------ #
@@ -191,30 +198,47 @@ class ObloCloudMqtt:
 
         _LOGGER.debug("OBLO cloud MQTT connected (session=%s...)", self._session_id[:8])
 
-    async def async_object_list(self) -> List[Dict[str, Any]]:
-        """Publish get_object_list_by_type_detailed, return object_list."""
+    async def _async_command(
+        self,
+        name: str,
+        params: Dict[str, Any],
+        timeout: Optional[float] = None,
+        msg_type: str = "command",
+        describe: str = "",
+    ) -> Dict[str, Any]:
+        """Publish one OHM command and await its reply.
+
+        Transport only: builds the 5-field SPA envelope (name, params, type,
+        uid, sender), publishes to the gateway's ohm/req topic with QoS 0 and
+        awaits the matching `uid` on the response topic. Returns the reply's
+        `params` dict.
+
+        Extracted from async_object_list so the write path rides the exact
+        envelope Andrew's working read path already proves. `sender` is
+        mandatory -- without it the gateway has no return address and the
+        reply is dropped silently, with no NACK and no error.
+        """
         if not self._connected.is_set():
             await self.async_connect()
 
-        last_err = None
+        timeout = REQUEST_TIMEOUT if timeout is None else timeout
+        label = describe or name
+        last_err: Optional[Exception] = None
+
         for attempt in range(1, MAX_RETRIES + 1):
             uid = self._next_uid()
             payload = {
-                "name": "get_object_list_by_type_detailed",
-                "params": {"type": "device"},
-                "type": "command",
+                "name": name,
+                "params": params,
+                "type": msg_type,
                 "uid": uid,
-                # Mandatory: the gateway uses this to pick the reply topic.
                 "sender": self._sender(),
             }
-            req_topic = f"oblo/{self._user_id}/gtw/{self._gateway_serial}/ohm/req"
+            req_topic = self._req_topic()
 
             _LOGGER.debug(
-                "OHM req attempt %d/%d uid=%d topic=%s",
-                attempt,
-                MAX_RETRIES,
-                uid,
-                req_topic,
+                "OHM req (%s) attempt %d/%d uid=%d type=%s topic=%s",
+                label, attempt, MAX_RETRIES, uid, msg_type, req_topic,
             )
 
             fut = self._loop.create_future()
@@ -228,23 +252,98 @@ class ObloCloudMqtt:
                     self._executor,
                     lambda: client.publish(req_topic, json.dumps(payload), qos=0),
                 )
-                result = await asyncio.wait_for(fut, timeout=REQUEST_TIMEOUT)
-                return result
+                return await asyncio.wait_for(fut, timeout=timeout)
             except asyncio.TimeoutError:
-                last_err = ObloTimeoutError(f"OHM request uid={uid} timed out after {REQUEST_TIMEOUT}s")
-                _LOGGER.warning("OHM attempt %d/%d timed out (uid=%d)", attempt, MAX_RETRIES, uid)
+                last_err = ObloTimeoutError(
+                    f"{label} uid={uid} timed out after {timeout}s")
+                _LOGGER.warning("%s attempt %d/%d timed out (uid=%d)",
+                                label, attempt, MAX_RETRIES, uid)
             except ObloAuthError:
                 raise
             except Exception as e:
                 last_err = e
-                _LOGGER.warning("OHM attempt %d/%d failed: %s", attempt, MAX_RETRIES, e)
+                _LOGGER.warning("%s attempt %d/%d failed: %s",
+                                label, attempt, MAX_RETRIES, e)
             finally:
                 self._futures.pop(uid, None)
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(1.0)
 
-        raise last_err or ObloTimeoutError("OHM object_list failed after retries")
+        raise last_err or ObloTimeoutError(f"{label} failed after retries")
+
+    def _req_topic(self) -> str:
+        """Nothing here may be assumed: the envelope shape was proved against
+        the SPA, not by guessing topic parts."""
+        return f"oblo/{self._user_id}/gtw/{self._gateway_serial}/ohm/req"
+
+    async def async_object_list(self) -> List[Dict[str, Any]]:
+        """Publish get_object_list_by_type_detailed, return object_list."""
+        params = await self._async_command(
+            "get_object_list_by_type_detailed",
+            {"type": "device"},
+            describe="OHM object_list",
+        )
+        return params.get("object_list") or params.get("objectList") or []
+
+    async def async_get_property(
+        self,
+        service_id: Any,
+        service_name: str,
+        property_name: str,
+        service_type: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """Read one property. The only honest write-confirmation primitive.
+
+        PUBACK proves nothing on this broker (unconditional ACKs, silent ACL
+        filtering), so a set is confirmed by reading the value back, never by
+        the absence of an error.
+        """
+        params: Dict[str, Any] = {
+            "id": service_id,
+            "service_name": service_name,
+            "property_name": property_name,
+        }
+        if service_type:
+            params["service_type"] = service_type
+        reply = await self._async_command(
+            "get_service_property_value", params,
+            timeout=timeout, describe="OHM get_property",
+        )
+        for key in ("property_value", "propertyValue", "value"):
+            if key in reply:
+                return reply[key]
+        return reply
+
+    async def async_set_property(
+        self,
+        service_id: Any,
+        service_name: str,
+        property_name: str,
+        value: Any,
+        service_type: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Write one property. Returns the reply params, not a verdict.
+
+        A zero code means the command was accepted, NOT that the device moved.
+        Callers must confirm with async_get_property() or an evt state change
+        before reporting success to a user -- a silently no-op switch is worse
+        than no switch.
+        """
+        params: Dict[str, Any] = {
+            "id": service_id,
+            "service_name": service_name,
+            "property_name": property_name,
+            "property_value": value,
+        }
+        if service_type:
+            params["service_type"] = service_type
+        return await self._async_command(
+            "set_service_property_value", params,
+            timeout=timeout, describe="OHM set_property",
+        )
 
     async def async_subscribe_events(self, callback: Callable[[Dict], None]) -> None:
         """Subscribe to gateway events for live device property changes."""
@@ -261,10 +360,17 @@ class ObloCloudMqtt:
         # SPA: oblo/<gtwUserId>/gtw/<SN>/+/evt  (the + is the device/bus id).
         # The earlier "gtw/+/ohm/evt" shape matched nothing the gateway emits.
         evt_topic = f"oblo/{self._user_id}/gtw/{self._gateway_serial}/+/evt"
+
         def _sub(c=client):
-            c.subscribe(evt_topic, 1)
-        await self._loop.run_in_executor(self._executor, _sub)
-        _LOGGER.info("OHM events subscribed: %s", evt_topic)
+            # _subscribe records the mid so the SUBACK line names this topic.
+            return self._subscribe(c, evt_topic, 1)
+
+        result = await self._loop.run_in_executor(self._executor, _sub)
+        # The SUBACK is the line that makes silence interpretable: a clean
+        # grant means "subscribed and quiet = healthy steady state", 0x80
+        # means we were never allowed to hear the stream.
+        mid = result[1] if isinstance(result, (tuple, list)) and len(result) == 2 else None
+        _LOGGER.info("EVT subscribe topic=%s mid=%s (SUBACK follows)", evt_topic, mid)
 
     async def async_close(self) -> None:
         """Clean disconnect."""
@@ -297,14 +403,12 @@ class ObloCloudMqtt:
             # "request" back to the client). Omitting /req silently drops those.
             for suffix in ("rsp", "req"):
                 rsp_topic = f"oblo/{self._user_id}/cli/{self._session_id}/{suffix}"
-                client.subscribe(rsp_topic, 1)
-                _LOGGER.info("SUB %s", rsp_topic)
+                self._subscribe(client, rsp_topic, 1)
             # also non-admin / sharing path (userId)
             if self._user_id != self._session_id:
                 for suffix in ("rsp", "req"):
                     rsp_alt = f"oblo/{self._user_id}/cli/{self._user_id}/{suffix}"
-                    client.subscribe(rsp_alt, 1)
-                    _LOGGER.info("SUB %s", rsp_alt)
+                    self._subscribe(client, rsp_alt, 1)
             self._conn_error = None
         else:
             # CONNACK 5 (Not authorized) means the broker rejected the identity
@@ -315,8 +419,42 @@ class ObloCloudMqtt:
                 f"(serial {self._gateway_serial})")
         self._connected.set()
 
+    def _subscribe(self, client: Any, topic: str, qos: int = 1) -> Any:
+        """Subscribe and remember which mid belongs to which topic.
+
+        paho's on_subscribe never gives the topic back, so without this the
+        SUBACK log can only say "something was granted". Silence + a clean
+        grant is a healthy steady state; silence + 0x80 is a refused
+        subscription. Those two must not look the same in the log.
+        """
+        try:
+            result = client.subscribe(topic, qos)
+        except Exception as e:  # pragma: no cover - never block connect on this
+            _LOGGER.warning("SUB failed topic=%s err=%s", topic, e)
+            return None
+        mid = None
+        if isinstance(result, (tuple, list)) and len(result) == 2:
+            mid = result[1]
+        if mid is not None:
+            self._sub_mid_topic[mid] = topic
+        _LOGGER.info("SUB %s qos=%s mid=%s", topic, qos, mid)
+        return result
+
     def _on_subscribe(self, client, userdata, mid, granted_qos, *extra):
-        _LOGGER.info("SUBACK mid=%s granted_qos=%s", mid, granted_qos)
+        """Log the granted codes against the topic they belong to."""
+        topic = self._sub_mid_topic.pop(mid, None) or f"<mid {mid}>"
+        try:
+            codes = tuple(int(c) for c in (granted_qos or ()))
+        except Exception:  # pragma: no cover
+            codes = granted_qos
+        self._sub_granted[topic] = codes
+        refused = [c for c in (codes if isinstance(codes, tuple) else ()) if c == 128]
+        if refused:
+            # 0x80 = the broker refused this subscription. This is the line
+            # that converts "quiet" into "we are not allowed to hear it".
+            _LOGGER.warning("SUBACK REFUSED topic=%s granted=%s", topic, codes)
+        else:
+            _LOGGER.info("SUBACK topic=%s granted=%s", topic, codes)
 
     # alias for tests that invoke the method directly
     def on_connect(self, client, userdata, flags, rc, *extra):
@@ -346,8 +484,9 @@ class ObloCloudMqtt:
                     code = payload.get("code", -1)
                     if code == 0 or str(code) == "0":
                         params = payload.get("params") or {}
-                        obj_list = params.get("object_list") or params.get("objectList") or []
-                        self._loop.call_soon_threadsafe(fut.set_result, obj_list)
+                        # Hand back the whole params dict; the caller knows which
+                        # key it asked for. Keeps _async_command generic.
+                        self._loop.call_soon_threadsafe(fut.set_result, params)
                     else:
                         msg_text = payload.get("message") or f"OHM error code {code}"
                         self._loop.call_soon_threadsafe(

@@ -30,12 +30,16 @@ class FakePaho:
     def __init__(self):
         self.published = []
         self.subscriptions = []
+        self._mid = 0
 
     def publish(self, topic, payload, qos=0):
         self.published.append((topic, json.loads(payload), qos))
 
     def subscribe(self, topic, qos=1):
+        # real paho returns (result, mid); the mid is what on_subscribe echoes
         self.subscriptions.append(topic)
+        self._mid += 1
+        return (0, self._mid)
 
 
 def make_client():
@@ -263,6 +267,117 @@ async def test_online_event():
         lg.removeHandler(h)
 
 
+async def test_generic_command():
+    """The write path must ride the identical envelope the read path proves."""
+    c, fake = make_client()
+    task = asyncio.create_task(c.async_set_property(
+        service_id="node14", service_name="outlet0",
+        property_name="State", value=1, service_type="OutletService"))
+    await asyncio.sleep(0.05)
+    topic, body, qos = fake.published[0]
+
+    check("set publishes to gtw ohm/req",
+          topic == "oblo/uid0123456789abcdef/gtw/C83DD4300D5B/ohm/req", topic)
+    check("set uses set_service_property_value",
+          body["name"] == "set_service_property_value", body["name"])
+    check("set keeps type=command", body["type"] == "command", body["type"])
+    check("set carries sender", bool(body.get("sender")), body)
+    check("set envelope has exactly the 5 SPA fields",
+          set(body) == {"name", "params", "type", "uid", "sender"}, sorted(body))
+    check("set params carry all four required keys",
+          body["params"] == {"id": "node14", "service_name": "outlet0",
+                             "property_name": "State", "property_value": 1,
+                             "service_type": "OutletService"}, body["params"])
+    check("set publishes QoS 0 like the SPA", qos == 0, qos)
+
+    # reply resolves with the raw params dict, not a verdict
+    rev = {"uid": body["uid"], "code": 0, "params": {"property_value": 1}}
+    c._on_message(None, None, types.SimpleNamespace(
+        topic="oblo/uid0123456789abcdef/cli/sid0123456789abcdef/rsp",
+        payload=json.dumps(rev).encode()))
+    got = await asyncio.wait_for(task, timeout=1)
+    check("set returns reply params", got == {"property_value": 1}, got)
+
+    # service_type is optional, and must be omitted rather than sent empty
+    c2, fake2 = make_client()
+    t2 = asyncio.create_task(c2.async_set_property("node14", "outlet0", "State", 0))
+    await asyncio.sleep(0.05)
+    p2 = fake2.published[0][1]["params"]
+    check("service_type omitted when not supplied", "service_type" not in p2, p2)
+    t2.cancel()
+
+    # get_property uses the read command and unwraps property_value
+    c3, fake3 = make_client()
+    t3 = asyncio.create_task(c3.async_get_property("node14", "outlet0", "State"))
+    await asyncio.sleep(0.05)
+    b3 = fake3.published[0][1]
+    check("get uses get_service_property_value",
+          b3["name"] == "get_service_property_value", b3["name"])
+    check("get does not send property_value", "property_value" not in b3["params"], b3["params"])
+    c3._on_message(None, None, types.SimpleNamespace(
+        topic="oblo/uid0123456789abcdef/cli/sid0123456789abcdef/rsp",
+        payload=json.dumps({"uid": b3["uid"], "code": 0,
+                            "params": {"property_value": "1"}}).encode()))
+    check("get returns the unwrapped value",
+          await asyncio.wait_for(t3, timeout=1) == "1")
+
+    # an error code must raise, not return an empty verdict
+    c4, fake4 = make_client()
+    t4 = asyncio.create_task(c4.async_set_property("node14", "outlet0", "State", 1))
+    await asyncio.sleep(0.05)
+    b4 = fake4.published[0][1]
+    c4._on_message(None, None, types.SimpleNamespace(
+        topic="oblo/uid0123456789abcdef/cli/sid0123456789abcdef/rsp",
+        payload=json.dumps({"uid": b4["uid"], "code": 5,
+                            "message": "no such service"}).encode()))
+    try:
+        await asyncio.wait_for(t4, timeout=1)
+        check("set raises on non-zero code", False, "returned normally")
+    except ObloAuthError as e:
+        check("set raises on non-zero code", True, str(e))
+
+
+async def test_suback_correlation():
+    """SUBACK must name its topic, and 0x80 must be visible as a refusal."""
+    import logging
+
+    c, fake = make_client()
+    c._connected.clear()
+    c._client = fake
+    seen = []
+    h = logging.Handler()
+    h.emit = lambda record: seen.append((record.levelname, record.getMessage()))
+    lg = logging.getLogger("oblo_living.cloud_mqtt")
+    lg.addHandler(h)
+    lg.setLevel(logging.INFO)
+    try:
+        c._on_connect(None, None, {}, 0)
+        subs = [(mid, t) for mid, t in c._sub_mid_topic.items()]
+        # session path (rsp+req) plus the non-admin userId path (rsp+req)
+        check("subscribes recorded a mid->topic map", len(subs) == 4, subs)
+        check("mids are ints", all(isinstance(m, int) for m, _ in subs), subs)
+
+        c._on_subscribe(None, None, subs[0][0], (1,))
+        line = [m for lvl, m in seen if m.startswith("SUBACK")]
+        check("SUBACK names the topic, not just the mid",
+              bool(line) and subs[0][1] in line[-1], line)
+        check("SUBACK carries granted codes", "granted=(1,)" in line[-1], line)
+        check("mid is consumed after its SUBACK",
+              subs[0][0] not in c._sub_mid_topic, c._sub_mid_topic)
+
+        # 0x80: the broker refused the subscription -- silence is not health
+        c._on_subscribe(None, None, subs[1][0], (128,))
+        refused = [m for lvl, m in seen if "REFUSED" in m]
+        check("0x80 logs a REFUSED warning", len(refused) == 1, seen[-3:])
+        check("REFUSED log is WARNING level",
+              any(lvl == "WARNING" and "REFUSED" in m for lvl, m in seen),
+              [s for s in seen if "REFUSED" in s[1]])
+        check("granted codes are queryable per topic",
+              c._sub_granted.get(subs[1][1]) == (128,), c._sub_granted)
+    finally:
+        lg.removeHandler(h)
+
+
 def main():
     async def run():
         await test_object_list()
@@ -275,6 +390,8 @@ def main():
         await test_sender_paths()
         await test_uid_uniqueness()
         await test_online_event()
+        await test_generic_command()
+        await test_suback_correlation()
 
     asyncio.run(run())
     failed = CHECKS.count(False)
