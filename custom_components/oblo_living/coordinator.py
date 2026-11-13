@@ -122,6 +122,26 @@ def write_token_for(current, want_on):
     return _DEFAULT_ON if want_on else _DEFAULT_OFF
 
 
+def ohm_object_shape(objects):
+    """Names-only snapshot of the raw OHM object_list structure.
+
+    Returns a dict of top-level keys from the first object and, if present,
+    the keys of the first service_list entry. No values are ever included.
+    """
+    if not objects:
+        return {}
+    first = objects[0]
+    if not isinstance(first, dict):
+        return {"type": type(first).__name__}
+    top = sorted(first.keys())
+    svc = []
+    for v in first.values():
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            svc = sorted(v[0].keys())
+            break
+    return {"object": top, "service_list[0]": svc}
+
+
 def normalise_ohm_objects(ohm_objects):
     """Convert OHM object_list from cloud MQTT to internal device shape.
 
@@ -642,6 +662,21 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 ohm_devices = normalise_ohm_objects(objects)
                 if ohm_devices:
                     _LOGGER.debug("OHM returned %d objects", len(ohm_devices))
+                # --- DIAGNOSTIC: what the live object_list actually carries ---
+                # normalise_ohm_objects() reads exactly id, device_name and
+                # service_list. Everything else in the payload is dropped --
+                # including a device class, if one is there, which is why the
+                # app's class->name table cannot fire on the live path. Field
+                # NAMES only, never a value: this answers whether class /
+                # fwVersion / busId travel at all without printing the device
+                # inventory into the log.
+                if not getattr(self, "_ohm_shape_dumped", False) and objects:
+                    self._ohm_shape_dumped = True
+                    try:
+                        _LOGGER.warning("DIAG ohm object shape: %s",
+                                        ohm_object_shape(objects))
+                    except Exception as _shape_err:
+                        _LOGGER.debug("DIAG ohm shape failed: %s", _shape_err)
             except ObloAuthError:
                 raise
             except ObloRateLimitError:

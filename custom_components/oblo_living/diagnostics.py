@@ -43,10 +43,6 @@ def _entry_summary(entry):
     for key in SENSITIVE_ENTRY_KEYS:
         if key in data or key in (entry.options or {}):
             out[f"{key}_present"] = True
-    # Never emit the raw values.
-    for key in SENSITIVE_ENTRY_KEYS:
-        if key in out:
-            out[key] = REDACTED
     out["unique_id"] = entry.unique_id
     out["version"] = getattr(entry, "version", None)
     out["domain"] = getattr(entry, "domain", None)
