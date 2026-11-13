@@ -14,7 +14,7 @@ from .cloud_api import (ObloAuthError, ObloCloudApi, ObloCloudError,
                            ObloRateLimitError, normalise_devices)
 from .cloud_mqtt import ObloCommandError
 from .const import DOMAIN, SCAN_INTERVAL_S
-from .entity_map import APP_CLASS_NAMES
+from .entity_map import APP_CLASS_NAMES, canonical_prop
 
 
 def diag_shape(payload):
@@ -542,19 +542,29 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             return
         did = _first(params, ("deviceId", "device_id", "objId", "objectId", "id"))
         svc = _first(params, ("serviceName", "service", "service_name"))
-        val = _first(params, ("value", "newValue", "new_value", "val", "property_value"))
+        val = _first(params, ("value", "newValue", "new_value", "val",
+                           "property_value", "propertyValue"))
+        # Normalise alternate wire spellings to the property name our entity map
+        # reads (PirState -> State, SmokeState -> State, ...). Without this the
+        # event writes props["PirState"] while the motion entity reads "State",
+        # so the sensor stays Unknown even though the event arrived. Deliberately
+        # narrow: display-only aliases (ActivePower, PropAlertType) are NOT
+        # applied -- see entity_map.PROP_ALIASES.
+        wire_prop = prop
+        prop = canonical_prop(prop)
         # Alert properties are logged at INFO: they are the only live proof we
         # can get that a siren started or stopped on the gateway's own terms.
         # Motion sensors: momentary, evt-driven, log at INFO so they're visible
         # without DEBUG config.
         is_motion = str(prop) in ("State", "Motion", "Occupancy") and \
                     str(svc) in ("PirService", "pir0", "MotionDetectorService")
+        _alias = "" if wire_prop == prop else f" (wire {wire_prop})"
         if str(prop).startswith("PropAlert") or is_motion:
-            _LOGGER.info("OBLO evt %s at %s device=%s service=%s %s=%r",
-                         evt_name, _stamp(), did, svc, prop, val)
+            _LOGGER.info("OBLO evt %s at %s device=%s service=%s %s%s=%r",
+                         evt_name, _stamp(), did, svc, prop, _alias, val)
         else:
-            _LOGGER.debug("OBLO evt %s at %s device=%s service=%s %s=%r",
-                          evt_name, _stamp(), did, svc, prop, val)
+            _LOGGER.debug("OBLO evt %s at %s device=%s service=%s %s%s=%r",
+                          evt_name, _stamp(), did, svc, prop, _alias, val)
         # Write-only props: our remembered write outranks a contradicting
         # gateway report. Applying it would pin the default into the overlay,
         # and _reapply_overlay would then restore it after every poll, making

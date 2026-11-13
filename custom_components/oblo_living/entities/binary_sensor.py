@@ -11,7 +11,8 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from ..entity_map import (
-    device_info_fields, entity_category_attr, entity_label_attr, read_prop
+    device_info_fields, entity_category_attr, entity_label_attr,
+    resolve_binary_prop, read_prop_strict,
 )
 
 
@@ -73,7 +74,12 @@ class ObloBinarySensor(CoordinatorEntity, BinarySensorEntity):
         for svc in dev.get("services", []):
             if svc.get("service") != self._ent["service"]:
                 continue
-            val = read_prop(svc, self._ent.get("value_prop"))
+            # Read the state-shaped property this service actually carries.
+            # The old code read "whatever property exists", so a motion sensor
+            # whose only props were DebouncePeriod/Sensitive reported a state
+            # invented from a config value. Unknown is the honest answer.
+            prop = resolve_binary_prop(svc, self._ent.get("value_prop"))
+            val = read_prop_strict(svc, prop)
             if val is None:
                 return None
             return str(val).lower() in TRUE_VALUES

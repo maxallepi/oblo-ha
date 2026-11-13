@@ -422,6 +422,71 @@ POWER_PROP_CANDIDATES = (
 POWER_SERVICES = {"power0", "PowerConsumptionService"}
 
 
+# ── Property-name aliases ───────────────────────────────────────────────
+# The app ships `mappedPropertyName` in app.js mapping wire names to display
+# names. Some of those entries are real alternate wire spellings of the SAME
+# property ("PirState" is the motion sensor's State, "SmokeState" the smoke
+# sensor's State); others are pure display labels ("PropAlertType" -> "Type",
+# "ActivePower" -> "Active Power") and applying those would BREAK working
+# code -- it would rename the alert-type property the select/button write, and
+# it would defeat the power resolver, which looks for ActivePower itself.
+#
+# So this map is deliberately narrow: only aliases whose target is a property
+# name OUR map already declares for that service family. Everything else stays
+# exactly as the gateway sent it.
+PROP_ALIASES = {
+    # binary state spellings -> "State" (motion, relay, contact, smoke, plug)
+    "PirState": "State",
+    "SmokeState": "State",
+    "PlugState": "State",
+    "AlarmState": "State",
+    "BinaryState": "State",
+    "ReedSwitchState": "State",
+    # value-shaped spellings -> the key our sensor map reads
+    "TemperatureValue": "Value",
+    "ThermostatValue": "Value",
+    "LightIntensity": "Intensity",
+    "WaterLevel": "Detected",     # FloodService declares "Detected"
+}
+
+
+def canonical_prop(prop):
+    """Wire property name -> the name our entity map reads.
+
+    Returns the input unchanged when there is no alias, so callers can apply
+    this unconditionally (see coordinator.handle_event).
+    """
+    if prop is None:
+        return None
+    return PROP_ALIASES.get(str(prop), prop)
+
+
+# Properties a binary sensor may legitimately carry, in preference order, when
+# the declared key is absent. A binary sensor that reads "the first property,
+# whatever it is" turns DebouncePeriod=5 into "motion detected" -- worse than
+# Unknown.
+BINARY_PROP_CANDIDATES = (
+    "State", "Detected", "Activated", "Motion", "Occupancy", "Pressed",
+    "Ring", "Leak", "WaterLevel", "AlarmStatus", "Status", "Contact",
+)
+
+
+def resolve_binary_prop(svc, declared_prop):
+    """The property a binary sensor should read on this service."""
+    if declared_prop is None:
+        return None
+    m = props_as_map(svc)
+    if not m:
+        return declared_prop
+    dl = str(declared_prop).lower()
+    if dl in m:
+        return m[dl][0]
+    for cand in BINARY_PROP_CANDIDATES:
+        if cand.lower() in m:
+            return m[cand.lower()][0]
+    return declared_prop
+
+
 def props_as_map(svc):
     """{lower_key: (original_key, value)} for a service's props."""
     out = {}
@@ -776,6 +841,11 @@ def build_entities(devices):
             # that never exists -> permanent Unknown.
             if canon in POWER_SERVICES or name in POWER_SERVICES:
                 prop = resolve_power_prop(svc, prop)
+            elif platform == "binary_sensor":
+                # Binary sensors read the state property this service actually
+                # carries (State vs Detected vs Activated vs PirState...), not a
+                # blind first-key fallback that would read DebouncePeriod.
+                prop = resolve_binary_prop(svc, prop)
             props = dict(svc.get("props") or [])
             state = props.get(prop) if prop else None
             if state is None and prop is not None:
