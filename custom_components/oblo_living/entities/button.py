@@ -84,22 +84,31 @@ class ObloSoundAlertButton(CoordinatorEntity, ButtonEntity):
         #    PropAlertType has no read-back contract: the poll omits it and a
         #    targeted read returns the gateway default "0". Reading it before
         #    every press is therefore what silently downgraded every alert to
-        #    NOTIFICATION. Order of trust: the gateway's poll value if it ever
-        #    appears, else the value we last wrote from the select.
-        type_wire = None
-        cur_type = read_prop_strict(svc, "PropAlertType") if svc else None
-        if cur_type is not None:
+        #    NOTIFICATION. Order of trust: what WE last wrote from the select,
+        #    else the gateway's value if one ever appears. The remembered write
+        #    outranks a snapshot default on purpose -- see LOCAL_AUTHORITY_PROPS.
+        type_wire = self.coordinator.local_write(did, svc_name, "PropAlertType")
+        if type_wire is not None:
             try:
-                type_wire = alert_type_wire(alert_type_label(cur_type))
+                # Normalise whatever we stored into a wire ordinal.
+                type_wire = alert_type_wire(alert_type_label(type_wire))
             except ValueError:
-                # garbage value -> fall through to what we remembered
                 _LOGGER.warning(
-                    "OBLO alert: unrecognised PropAlertType %r on %s, "
-                    "falling back to the last selected type", cur_type,
+                    "OBLO alert: unrecognised remembered PropAlertType %r on "
+                    "%s, falling back to the gateway value", type_wire,
                     self._attr_name)
                 type_wire = None
         if type_wire is None:
-            type_wire = self.coordinator.local_write(did, svc_name, "PropAlertType")
+            cur_type = read_prop_strict(svc, "PropAlertType") if svc else None
+            if cur_type is not None:
+                try:
+                    type_wire = alert_type_wire(alert_type_label(cur_type))
+                except ValueError:
+                    _LOGGER.warning(
+                        "OBLO alert: unrecognised PropAlertType %r on %s, "
+                        "sounding with the stored type", cur_type,
+                        self._attr_name)
+                    type_wire = None
         if type_wire is not None:
             _LOGGER.info("OBLO alert: setting type to %s before sounding", type_wire)
             r = await self.coordinator.async_write_service_property(

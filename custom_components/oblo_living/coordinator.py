@@ -347,6 +347,41 @@ class ObloDataCoordinator(DataUpdateCoordinator):
     def forget_local_writes(self):
         """Drop remembered writes. Called on reconnect: new session, new mood."""
         self._local_writes = {}
+        self._prop_disagreements = set()
+
+    # ── local authority over write-only properties (v0.2.39) ────────────
+    # PropAlertType is write-only: the gateway never reports it back. If a
+    # contradicting value ever reaches us anyway (a snapshot evt on connect,
+    # or a default read), letting it win would pin "0" into _evt_overlay and
+    # _reapply_overlay would restore "0" after every poll -- the user's
+    # remembered Alarm would be unreachable forever, and the select would
+    # silently show Notification while the button sounded it. So for these
+    # properties the remembered write wins for display and press; a differing
+    # gateway value is reported ONCE at INFO instead of being applied.
+    LOCAL_AUTHORITY_PROPS = ("PropAlertType",)
+
+    def _local_authority(self, device_id, service_name, prop):
+        """Our remembered write for a local-authority prop, else None."""
+        if str(prop) not in self.LOCAL_AUTHORITY_PROPS:
+            return None
+        return self.local_write(device_id, service_name, prop)
+
+    def _note_gateway_disagreement(self, device_id, service_name, prop,
+                                   gateway_value, local_value):
+        """Log a contradicting gateway report once per distinct value pair."""
+        seen = getattr(self, "_prop_disagreements", None)
+        if seen is None:
+            seen = self._prop_disagreements = set()
+        key = (str(device_id), str(service_name), str(prop),
+               str(gateway_value), str(local_value))
+        if key in seen:
+            return False
+        seen.add(key)
+        _LOGGER.info(
+            "OBLO: gateway reports %s=%r after our write of %r "
+            "(device=%s service=%s) -- write may not have latched",
+            prop, gateway_value, local_value, device_id, service_name)
+        return True
 
     def push_local_update(self):
         """Push cached data to entities after a local, non-poll change.
@@ -466,6 +501,14 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         else:
             _LOGGER.debug("OBLO evt %s at %s device=%s service=%s %s=%r",
                           evt_name, _stamp(), did, svc, prop, val)
+        # Write-only props: our remembered write outranks a contradicting
+        # gateway report. Applying it would pin the default into the overlay,
+        # and _reapply_overlay would then restore it after every poll, making
+        # the user's choice permanently unreachable. Log once, change nothing.
+        local_val = self._local_authority(did, svc, prop)
+        if local_val is not None and str(val) != str(local_val):
+            self._note_gateway_disagreement(did, svc, prop, val, local_val)
+            return
         if self._apply_property_change(did, svc, prop, val):
             # Remember it: the next poll may omit the property entirely (the
             # gateway does not persist live state), and dropping it would flip
@@ -868,16 +911,44 @@ class ObloDataCoordinator(DataUpdateCoordinator):
 
         This keeps the overlay invariant: "last value the gateway itself reported"
         — whether via live evt or a poll that included it.
+
+        Exception: LOCAL_AUTHORITY_PROPS (PropAlertType). The gateway never
+        reports those back, so a value that appears in the payload is a
+        snapshot default, not a measurement. Our remembered write wins: the
+        tree is forced to it, the differing payload value is logged once, and
+        the overlay is NOT refreshed from the payload -- refreshing it is what
+        made a single "0" permanent, restoring it after every poll.
         """
         applied = 0
         for dev in self.devices or []:
             for svc in dev.get("services") or []:
                 key = (str(dev.get("id")), str(svc.get("service")))
-                remembered = self._overlay().get(key)
-                if not remembered:
-                    continue
+                remembered = self._overlay().get(key) or {}
                 props = svc.get("props")
                 if isinstance(props, dict):
+                    # Local-authority props first: force our value into the
+                    # tree even when the payload carries a different one.
+                    for name in self.LOCAL_AUTHORITY_PROPS:
+                        local_val = self._local_authority(
+                            dev.get("id"), svc.get("service"), name)
+                        if local_val is None:
+                            continue
+                        k = next((pk for pk in props
+                                  if str(pk).lower() == name.lower()), None)
+                        if k is None:
+                            props[name] = local_val
+                            applied += 1
+                        elif str(props[k]) != str(local_val):
+                            self._note_gateway_disagreement(
+                                dev.get("id"), svc.get("service"), name,
+                                props[k], local_val)
+                            props[k] = local_val
+                            applied += 1
+                        remembered.pop(name, None)
+                    if not props:
+                        continue
+                    if not remembered:
+                        continue
                     # Build case-insensitive map of payload props
                     current = {str(k).lower(): k for k in props}
                     for name, value in list(remembered.items()):
@@ -888,6 +959,29 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                         else:
                             remembered[name] = props[k]
                 elif isinstance(props, list):
+                    for name in self.LOCAL_AUTHORITY_PROPS:
+                        local_val = self._local_authority(
+                            dev.get("id"), svc.get("service"), name)
+                        if local_val is None:
+                            continue
+                        found = None
+                        for pair in props:
+                            if (isinstance(pair, (list, tuple)) and len(pair) >= 2
+                                    and str(pair[0]).lower() == name.lower()):
+                                found = pair
+                                break
+                        if found is None:
+                            props.append([name, local_val])
+                            applied += 1
+                        elif str(found[1]) != str(local_val):
+                            self._note_gateway_disagreement(
+                                dev.get("id"), svc.get("service"), name,
+                                found[1], local_val)
+                            # Rebuild rather than mutate: a payload pair may be
+                            # a tuple, which has no __setitem__.
+                            props[props.index(found)] = (name, local_val)
+                            applied += 1
+                        remembered.pop(name, None)
                     for name, value in list(remembered.items()):
                         found = None
                         for pair in props:

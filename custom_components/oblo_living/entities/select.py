@@ -63,22 +63,24 @@ class ObloAlertTypeSelect(CoordinatorEntity, SelectEntity):
 
     @property
     def current_option(self):
+        # 1) Our own remembered write wins. PropAlertType is write-only, so a
+        #    value from the poll/evt is a snapshot default, not a measurement;
+        #    letting it win would silently revert the user's choice to
+        #    Notification while the button still had to guess. The coordinator
+        #    logs an INFO line when a gateway value disagrees.
+        wire = self._local_type_wire()
+        if wire is not None:
+            lbl = alert_type_label(wire)
+            if lbl in self._attr_options:
+                return lbl
+        # 2) Otherwise show whatever the gateway reports, if anything.
         svc = self._service()
-        # 1) If the poll carries it, the gateway spoke — trust the poll.
         if svc is not None:
             val = read_prop_strict(svc, "PropAlertType")
             if val is not None:
                 lbl = alert_type_label(val)
                 if lbl in self._attr_options:
                     return lbl
-        # 2) Otherwise, if we wrote it and the gateway didn't object, that's
-        #    our honest best truth. We don't raise on mismatch; the UI simply
-        #    shows what we asked for.
-        wire = self._local_type_wire()
-        if wire is not None:
-            lbl = alert_type_label(wire)
-            if lbl in self._attr_options:
-                return lbl
         return None
 
     @property

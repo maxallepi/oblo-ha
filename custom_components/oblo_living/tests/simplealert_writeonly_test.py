@@ -30,7 +30,7 @@ from custom_components.oblo_living.entities.button import ObloSoundAlertButton
 CHECKS = []
 
 
-def check(label, cond, detail=""):
+def check(label, cond, detail: object = ""):
     CHECKS.append((label, bool(cond), detail))
     print(f"{'PASS' if cond else 'FAIL'}  {label}" + (f"  <- {detail}" if detail and not cond else ""))
 
@@ -266,14 +266,14 @@ coord.remember_local_write(15, "SimpleAlertService", "PropAlertType", "1")
 coord.set_ohm_client(None)  # reconnect
 check("6a local_writes cleared", coord.local_write(15, "SimpleAlertService", "PropAlertType") is None)
 
-# 7. poll carrying the property wins over local
-print("\n=== Test 7: poll value beats local ===")
+# 7. local write wins over poll (priority inversion for write-only prop)
+print("\n=== Test 7: local write beats poll ===")
 dev = make_device(prop_alert_type="1")  # poll says Alarm
 coord = FakeCoordinator([dev])
 coord.remember_local_write(15, "SimpleAlertService", "PropAlertType", "3")  # local says Emergency
 select_ent = make_ent()
 select = ObloAlertTypeSelect(coord, select_ent)
-check("7a current_option = Alarm (poll wins)", select.current_option == "Alarm")
+check("7a current_option = Emergency (local wins)", select.current_option == "Emergency")
 
 # 8. The press sends the remembered type, in order, then start
 print("\n=== Test 8: press sends remembered type then start ===")
@@ -304,8 +304,8 @@ check("9a no PropAlertType write when nothing selected", "PropAlertType" not in 
 check("9b start still sent", ("PropAlertStartStop", "true") in
       [(w["prop"], w["value"]) for w in coord.writes], coord.writes)
 
-# 10. NC: the old read-back path would have sent "0"
-print("\n=== Test 10: poll value still wins if it ever appears ===")
+# 10. Local write still wins if poll ever appears
+print("\n=== Test 10: local write wins over poll (press path) ===")
 dev = make_device(prop_alert_type="2")   # gateway says Warning
 coord = FakeCoordinator([dev])
 coord.remember_local_write(15, "SimpleAlertService", "PropAlertType", "3")
@@ -313,8 +313,88 @@ btn = ObloSoundAlertButton(coord, {**make_ent(), "unique_id": "sound_15_10",
                                    "platform": "button"})
 asyncio.run(btn.async_press())
 first = coord.writes[0] if coord.writes else {}
-check("10a press used poll type 2, not remembered 3",
-      first.get("prop") == "PropAlertType" and first.get("value") == "2", coord.writes)
+check("10a press used remembered type 3, not poll 2",
+      first.get("prop") == "PropAlertType" and first.get("value") == "3", coord.writes)
+
+# 11. Fake-evt NC: evt carries '0' when local is '1' -> select stays Alarm,
+#     INFO line fires, overlay does not pin '0'. Uses the REAL coordinator so
+#     handle_event / _local_authority / _note_gateway_disagreement are the
+#     production implementations, not test doubles.
+print("\n=== Test 11: fake evt with contradicting value does not win ===")
+import logging  # noqa: E402
+from custom_components.oblo_living.coordinator import ObloDataCoordinator  # noqa: E402
+
+
+def make_real_coordinator(devices):
+    c = ObloDataCoordinator.__new__(ObloDataCoordinator)
+    c.ohm = object()
+    c.devices = devices
+    c.data = devices
+    c._alert_stoppers = {}
+    c._alert_generation = {}
+    c._evt_overlay = {}
+    c._local_writes = {}
+    c.updated = []
+    c.async_set_updated_data = lambda d: c.updated.append(d)
+    return c
+
+
+real = make_real_coordinator([make_device()])
+real.remember_local_write(15, "SimpleAlertService", "PropAlertType", "1")
+select = ObloAlertTypeSelect(real, make_ent())
+
+cap = logging.Handler()
+msgs = []
+
+
+def emit(record):
+    if record.levelno >= logging.INFO:
+        msgs.append(record.getMessage())
+
+
+cap.emit = emit
+cap.setLevel(logging.INFO)
+_logger = logging.getLogger("custom_components.oblo_living.coordinator")
+_logger.addHandler(cap)
+_logger.setLevel(logging.INFO)
+
+EVT = {"name": "property_change",
+       "params": {"deviceId": "15", "serviceName": "SimpleAlertService",
+                  "propertyName": "PropAlertType", "value": "0"}}
+
+real.handle_event(EVT)
+check("11a select still shows Alarm (local wins)",
+      select.current_option == "Alarm", select.current_option)
+disagree_msgs = [m for m in msgs if "gateway reports PropAlertType" in m]
+check("11b INFO line logged for disagreement", len(disagree_msgs) == 1, disagree_msgs)
+check("11c evt was NOT written into the evt overlay",
+      "PropAlertType" not in (real._evt_overlay.get(("15", "SimpleAlertService")) or {}),
+      real._evt_overlay)
+
+# Dedupe: a second identical evt must not log again.
+msgs.clear()
+real.handle_event(EVT)
+check("11d second identical evt does not log again",
+      not [m for m in msgs if "gateway reports PropAlertType" in m], msgs)
+
+# A poll that starts carrying the default must not undo the selection either:
+# _reapply_overlay forces the local value into the tree.
+polled = make_device(prop_alert_type="0")
+real.devices = [polled]
+real.data = [polled]
+real._reapply_overlay()
+check("11e poll default '0' overwritten by the local write in the tree",
+      polled["services"][0]["props"].get("PropAlertType") == "1",
+      polled["services"][0]["props"])
+
+# And the disagreement is logged for the poll path too (new pair: 0 vs 1 already
+# seen, so this must stay quiet -- dedupe is by value pair, not by source).
+msgs.clear()
+real._reapply_overlay()
+check("11f repeated poll does not spam the log",
+      not [m for m in msgs if "gateway reports PropAlertType" in m], msgs)
+
+_logger.removeHandler(cap)
 
 print(f"\n=== SUMMARY: {sum(c[1] for c in CHECKS)}/{len(CHECKS)} checks passed ===")
 for label, ok, detail in CHECKS:
