@@ -693,7 +693,30 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             except Exception as err:
                 _LOGGER.warning("OHM object list failed, using REST data: %s", err)
 
-        self.devices = merge_devices(rest_devices, ohm_devices)
+        # A poll that returns nothing is not evidence that the house is empty.
+        # Publishing [] makes every entity lose its state and flip to
+        # `unknown` -- the exact false negative that hides a failed fetch behind
+        # a plausible-looking value. Only rate-limit and auth failures kept the
+        # cache before this guard; a *successful* poll whose OHM round-trip came
+        # back empty would assign [] as truth. Keep the last good list instead
+        # and say why, so the next failure is diagnosable from the log alone.
+        fresh = merge_devices(rest_devices, ohm_devices)
+        if fresh:
+            self.devices = fresh
+        elif self.devices:
+            _LOGGER.warning(
+                "OBLO poll returned no devices (rest=%d, ohm=%d); keeping the "
+                "%d cached device(s) rather than publishing an empty house",
+                len(rest_devices or []), len(ohm_devices or []),
+                len(self.devices))
+        else:
+            # First ever poll and nothing came back: there is no cache to
+            # protect, so record it loudly and publish the (empty) truth.
+            _LOGGER.warning(
+                "OBLO poll returned no devices and no cache exists "
+                "(rest=%d, ohm=%d); entities will be created empty",
+                len(rest_devices or []), len(ohm_devices or []))
+            self.devices = fresh
 
         # Re-apply what the gateway last told us for properties this payload
         # omits. The poll is a snapshot of what the gateway persists, not of
