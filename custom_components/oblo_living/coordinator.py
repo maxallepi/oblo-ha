@@ -193,10 +193,35 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         #   await client.async_object_list() -> list of OHM objects
         #   await client.async_close()
         self.ohm = None
+        # key -> coroutine function that undoes an in-flight actuation
+        self._alert_stoppers = {}
 
     def set_ohm_client(self, client):
         """Attach the cloud MQTT/OHM client (or None to disable)."""
         self.ohm = client
+
+    # ── in-flight actuation bookkeeping ─────────────────────────────────
+    # A sound-alert press writes "true", sleeps, then writes "false". If HA
+    # stops or reloads during that sleep the coroutine is cancelled and the
+    # "false" is never sent -- the siren keeps sounding with nobody left to
+    # silence it. Anything that must be undone on teardown registers a stopper
+    # here; async_unload_entry drains them while the OHM client is still open.
+    def register_alert_stopper(self, key, stopper):
+        self._alert_stoppers[key] = stopper
+
+    def unregister_alert_stopper(self, key):
+        self._alert_stoppers.pop(key, None)
+
+    async def async_stop_active_alerts(self):
+        """Best-effort teardown: undo every in-flight actuation."""
+        stoppers = list(self._alert_stoppers.items())
+        self._alert_stoppers.clear()
+        for key, stopper in stoppers:
+            try:
+                await stopper()
+                _LOGGER.info("OBLO alert: stopped in-flight actuation %s on unload", key)
+            except Exception as err:  # noqa: BLE001 - teardown must not raise
+                _LOGGER.warning("OBLO alert: could not stop %s on unload: %s", key, err)
 
     # ── control path ────────────────────────────────────────────────────
     # PUBACK proves nothing on this broker (ACKs are unconditional and ACLs

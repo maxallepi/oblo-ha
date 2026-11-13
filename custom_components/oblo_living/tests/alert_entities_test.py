@@ -258,6 +258,70 @@ async def test_silence_unconfirmed():
 check("silence unconfirmed -> raises", asyncio.run(test_silence_unconfirmed()))
 
 
+# ----- tests: siren safety (cancellation / unload) --------------------------
+
+print("\n--- siren safety ---")
+
+# A press that is cancelled mid-wait (HA reload, job cancelled) must still
+# send the stop. Without the finally+shield the siren keeps sounding forever.
+_saved_sound_s = btn_mod.ALERT_SOUND_S
+btn_mod.ALERT_SOUND_S = 10
+coord = make_coordinator([{**dev, "services": [svc_with_type]}])
+coord.ohm = FakeMqtt(readbacks=["2", "true", "false"])
+sound4 = ObloSoundAlertButton(coord, sound_ent)
+
+async def test_cancel_mid_wait():
+    task = asyncio.ensure_future(sound4.async_press())
+    await asyncio.sleep(0.2)          # past the start write, inside the wait
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    await asyncio.sleep(0.2)          # let the shielded stop write land
+    return [w["value"] for w in coord.ohm.writes
+            if w["property_name"] == "PropAlertStartStop"]
+
+seq = asyncio.run(test_cancel_mid_wait())
+check("cancelled press still sent start", "true" in seq, f"seq={seq}")
+check("cancelled press still sent STOP", "false" in seq, f"seq={seq}")
+btn_mod.ALERT_SOUND_S = _saved_sound_s
+
+# A completed press leaves no stopper registered (nothing to drain later)
+coord = make_coordinator([{**dev, "services": [svc_with_type]}])
+coord.ohm = FakeMqtt(readbacks=["2", "true", "false"])
+sound5 = ObloSoundAlertButton(coord, sound_ent)
+asyncio.run(sound5.async_press())
+check("completed press leaves no registered stopper",
+      coord._alert_stoppers == {}, f"{coord._alert_stoppers}")
+
+# Unload drain stops anything still in flight, and clears the registry
+coord = make_coordinator([{**dev, "services": [svc_with_type]}])
+coord.ohm = FakeMqtt(readbacks=["false"])
+sound6 = ObloSoundAlertButton(coord, sound_ent)
+key = "15:SimpleAlertService"
+coord.register_alert_stopper(key, lambda: sound6._async_stop("15", "SimpleAlertService", "SimpleAlertService"))
+check("stopper registered before unload", key in coord._alert_stoppers)
+asyncio.run(coord.async_stop_active_alerts())
+check("unload drain wrote stop",
+      any(w["property_name"] == "PropAlertStartStop" and w["value"] == "false"
+          for w in coord.ohm.writes))
+check("unload drain cleared registry", coord._alert_stoppers == {})
+
+# A stopper that raises must not break teardown of the others
+coord = make_coordinator([{**dev, "services": [svc_with_type]}])
+coord.ohm = FakeMqtt(readbacks=["false"])
+sound7 = ObloSoundAlertButton(coord, sound_ent)
+async def _boom():
+    raise RuntimeError("gateway gone")
+coord.register_alert_stopper("a:bad", _boom)
+coord.register_alert_stopper(key, lambda: sound7._async_stop("15", "SimpleAlertService", "SimpleAlertService"))
+before = len(coord.ohm.writes)
+asyncio.run(coord.async_stop_active_alerts())
+check("a failing stopper does not stop the drain",
+      len(coord.ohm.writes) > before and coord._alert_stoppers == {})
+
+
 # ----- summary --------------------------------------------------------------
 
 print("\n--- SUMMARY ---")

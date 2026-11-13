@@ -82,19 +82,44 @@ class ObloSoundAlertButton(CoordinatorEntity, ButtonEntity):
                 if r.get("confirmed") is False:
                     raise HomeAssistantError(f"Alert type write refused: {r.get('error')}")
 
-        # 2) Start the siren
-        _LOGGER.info("OBLO alert: sounding %s", self._attr_name)
-        r = await self.coordinator.async_write_service_property(
-            did, svc_name, "PropAlertStartStop", ALERT_START_TOKEN,
-            service_type=svc_type,
-            confirm_timeout=OHM_CONFIRM_TIMEOUT_S,
-        )
-        if r.get("confirmed") is False:
-            raise HomeAssistantError(f"Alert start refused: {r.get('error')}")
+        # 2) Start the siren, and make the stop unmissable. If HA reloads or
+        # the job is cancelled during the wait, the coroutine is cancelled --
+        # a bare `await sleep(); write(false)` never runs, and the siren keeps
+        # sounding with nobody left to silence it. The `finally` below sends
+        # the stop anyway, and the registered stopper lets async_unload_entry
+        # retry it if this final await is itself cut short.
+        key = f"{did}:{svc_name}"
+        started = False
+        try:
+            _LOGGER.info("OBLO alert: sounding %s", self._attr_name)
+            r = await self.coordinator.async_write_service_property(
+                did, svc_name, "PropAlertStartStop", ALERT_START_TOKEN,
+                service_type=svc_type,
+                confirm_timeout=OHM_CONFIRM_TIMEOUT_S,
+            )
+            if r.get("confirmed") is False:
+                raise HomeAssistantError(f"Alert start refused: {r.get('error')}")
+            started = True
+            self.coordinator.register_alert_stopper(
+                key, lambda: self._async_stop(did, svc_name, svc_type))
 
-        # 3) Wait the configured duration, then stop
-        await asyncio.sleep(ALERT_SOUND_S)
-        _LOGGER.info("OBLO alert: stopping %s after %ss", self._attr_name, ALERT_SOUND_S)
+            # 3) Wait the configured duration, then stop
+            await asyncio.sleep(ALERT_SOUND_S)
+        finally:
+            if started:
+                _LOGGER.info("OBLO alert: stopping %s after %ss",
+                             self._attr_name, ALERT_SOUND_S)
+                try:
+                    # shield: a cancelled press must not skip the stop write
+                    await asyncio.shield(self._async_stop(did, svc_name, svc_type))
+                except asyncio.CancelledError:
+                    # the shielded stop is already in flight; leave the stopper
+                    # registered so the unload drain retries it
+                    raise
+                self.coordinator.unregister_alert_stopper(key)
+
+    async def _async_stop(self, did, svc_name, svc_type):
+        """Write the stop edge and report it. Idempotent by nature."""
         r = await self.coordinator.async_write_service_property(
             did, svc_name, "PropAlertStartStop", ALERT_STOP_TOKEN,
             service_type=svc_type,
@@ -102,6 +127,7 @@ class ObloSoundAlertButton(CoordinatorEntity, ButtonEntity):
         )
         if r.get("confirmed") is False:
             _LOGGER.warning("Alert stop write unconfirmed: %s", r.get("error"))
+        return r
 
 
 class ObloSilenceAlertButton(CoordinatorEntity, ButtonEntity):

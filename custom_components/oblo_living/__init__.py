@@ -181,6 +181,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ohm = data.get("ohm")
     coord = data.get("coordinator")
     if coord is not None:
+        # Drain any in-flight actuations (e.g. a sounding siren) while the
+        # OHM client is still attached. A cancelled press coroutine may have
+        # left the "stop" write pending; this retries it.
+        await coord.async_stop_active_alerts()
         coord.set_ohm_client(None)
     if ohm is not None:
         try:
