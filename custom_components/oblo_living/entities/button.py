@@ -54,6 +54,11 @@ class ObloSoundAlertButton(CoordinatorEntity, ButtonEntity):
         did = self._ent["device_id"]
         svc_name = self._ent["service"]
         svc_type = self._ent.get("service_type")
+        key = f"{did}:{svc_name}"
+        # Remember which press we are. Silence bumps this; if it changed while
+        # we were setting the type, the stop already went out and writing
+        # "true" now would re-sound a siren Andrew just silenced.
+        gen = self.coordinator.alert_generation(key)
         svc = self._service()
 
         # 1) Ensure the type is set (write order matters for the siren)
@@ -90,6 +95,12 @@ class ObloSoundAlertButton(CoordinatorEntity, ButtonEntity):
         # retry it if this final await is itself cut short.
         key = f"{did}:{svc_name}"
         started = False
+        # Superseded while preparing? Then a Silence has already been sent and
+        # this press must not start the siren.
+        if self.coordinator.alert_generation(key) != gen:
+            _LOGGER.info("OBLO alert: %s press superseded by Silence before "
+                         "start; not sounding", self._attr_name)
+            return
         try:
             _LOGGER.info("OBLO alert: sounding %s", self._attr_name)
             r = await self.coordinator.async_write_service_property(
@@ -158,6 +169,9 @@ class ObloSilenceAlertButton(CoordinatorEntity, ButtonEntity):
         did = self._ent["device_id"]
         svc_name = self._ent["service"]
         svc_type = self._ent.get("service_type")
+        # Bump first: any Sound press still preparing its type must abandon
+        # rather than write "true" after this stop.
+        self.coordinator.bump_alert_generation(f"{did}:{svc_name}")
         _LOGGER.info("OBLO alert: silencing %s", self._attr_name)
         r = await self.coordinator.async_write_service_property(
             did, svc_name, "PropAlertStartStop", ALERT_STOP_TOKEN,

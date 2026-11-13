@@ -195,6 +195,10 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         self.ohm = None
         # key -> coroutine function that undoes an in-flight actuation
         self._alert_stoppers = {}
+        # key -> monotonic press generation. A Silence press bumps the
+        # generation so an in-flight Sound press can tell it has been
+        # superseded and must not go on to write "true".
+        self._alert_generation = {}
 
     def set_ohm_client(self, client):
         """Attach the cloud MQTT/OHM client (or None to disable)."""
@@ -211,6 +215,21 @@ class ObloDataCoordinator(DataUpdateCoordinator):
 
     def unregister_alert_stopper(self, key):
         self._alert_stoppers.pop(key, None)
+
+    # ── press generation ────────────────────────────────────────────────
+    # Silence is a stop, but a Sound press is a sequence of writes (set type,
+    # start, wait, stop). If Andrew presses Silence while that sequence is
+    # still preparing, the stop lands first and the start lands after it --
+    # the siren re-sounds *after* being silenced. Each press increments the
+    # generation; a Sound press compares its own generation before it writes
+    # "true" and abandons the press if Silence has overtaken it.
+    def alert_generation(self, key):
+        return self._alert_generation.get(key, 0)
+
+    def bump_alert_generation(self, key):
+        gen = self._alert_generation.get(key, 0) + 1
+        self._alert_generation[key] = gen
+        return gen
 
     async def async_stop_active_alerts(self):
         """Best-effort teardown: undo every in-flight actuation."""

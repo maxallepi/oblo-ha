@@ -322,6 +322,111 @@ check("a failing stopper does not stop the drain",
       len(coord.ohm.writes) > before and coord._alert_stoppers == {})
 
 
+# ----- tests: Silence vs Sound race -----------------------------------------
+# The Sound press is a sequence (set type, start, wait, stop). Silence is a
+# single stop. If Silence lands mid-sequence, the stop must not be followed by
+# a start -- that re-sounds a siren Andrew just silenced.
+
+print("\n--- silence race ---")
+
+class HookedMqtt(FakeMqtt):
+    """FakeMqtt that runs a callback once, at a chosen write.
+
+    Read-backs echo what the gateway would report for that property, keyed by
+    property name, so concurrent presses cannot scramble a scripted list.
+    """
+
+    def __init__(self, echo=None, at_prop=None, hook=None):
+        super().__init__(readbacks=["x"])
+        self._echo = dict(echo or {})
+        self._last = {}
+        self._at_prop = at_prop
+        self._hook = hook
+        self._fired = False
+
+    async def async_set_property(self, device_id, service_name, property_name,
+                                 value, service_type=None, timeout=None):
+        res = await super().async_set_property(
+            device_id, service_name, property_name, value,
+            service_type=service_type, timeout=timeout)
+        self._last[property_name] = value
+        if not self._fired and property_name == self._at_prop:
+            self._fired = True
+            await self._hook()
+        return res
+
+    async def async_get_property(self, device_id, service_name, property_name,
+                                 service_type=None, timeout=None):
+        self.reads.append({"device_id": device_id, "service_name": service_name,
+                           "property_name": property_name})
+        if property_name in self._echo:
+            return self._echo[property_name]
+        return self._last.get(property_name, "false")
+
+
+# 1) Silence during the type write: the start must never be sent
+coord = make_coordinator([{**dev, "services": [svc_with_type]}])
+silence_r = ObloSilenceAlertButton(coord, silence_ent)
+sound_r = ObloSoundAlertButton(coord, sound_ent)
+coord.ohm = HookedMqtt(echo={"PropAlertType": "2"},
+                       at_prop="PropAlertType",
+                       hook=lambda: silence_r.async_press())
+
+async def test_silence_during_type_write():
+    await sound_r.async_press()
+    return [w for w in coord.ohm.writes]
+
+writes = asyncio.run(test_silence_during_type_write())
+starts = [w for w in writes
+          if w["property_name"] == "PropAlertStartStop" and w["value"] == "true"]
+stops = [w for w in writes
+         if w["property_name"] == "PropAlertStartStop" and w["value"] == "false"]
+check("silence during type write: start never sent", starts == [],
+      f"start writes={starts}")
+check("silence during type write: stop was sent", len(stops) == 1,
+      f"stop writes={stops}")
+check("silence during type write: no stopper left behind",
+      coord._alert_stoppers == {}, f"{coord._alert_stoppers}")
+
+# 2) Silence after the siren started: the stop still lands, and no second start
+_saved = btn_mod.ALERT_SOUND_S
+btn_mod.ALERT_SOUND_S = 10
+coord = make_coordinator([{**dev, "services": [svc_with_type]}])
+silence_a = ObloSilenceAlertButton(coord, silence_ent)
+sound_a = ObloSoundAlertButton(coord, sound_ent)
+coord.ohm = FakeMqtt(readbacks=["2", "true", "false", "false"])
+
+async def test_silence_after_start():
+    task = asyncio.ensure_future(sound_a.async_press())
+    await asyncio.sleep(0.2)          # past the start write, inside the wait
+    await silence_a.async_press()     # Andrew hits Silence
+    task.cancel()                     # ...and HA cancels the pending press
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    await asyncio.sleep(0.2)
+    return [w for w in coord.ohm.writes]
+
+writes = asyncio.run(test_silence_after_start())
+starts = [w for w in writes
+          if w["property_name"] == "PropAlertStartStop" and w["value"] == "true"]
+stops = [w for w in writes
+         if w["property_name"] == "PropAlertStartStop" and w["value"] == "false"]
+check("silence after start: exactly one start", len(starts) == 1, f"{starts}")
+check("silence after start: finish still confirms a stop", len(stops) >= 1, f"{stops}")
+btn_mod.ALERT_SOUND_S = _saved
+
+# 3) A normal press still sounds when nothing interrupts it
+coord = make_coordinator([{**dev, "services": [svc_with_type]}])
+coord.ohm = FakeMqtt(readbacks=["2", "true", "false"])
+sound_n = ObloSoundAlertButton(coord, sound_ent)
+asyncio.run(sound_n.async_press())
+seq = [w["value"] for w in coord.ohm.writes
+       if w["property_name"] == "PropAlertStartStop"]
+check("uninterrupted press still sounds then stops", seq == ["true", "false"], f"{seq}")
+
+
 # ----- summary --------------------------------------------------------------
 
 print("\n--- SUMMARY ---")
