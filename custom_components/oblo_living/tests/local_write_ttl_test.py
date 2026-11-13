@@ -222,6 +222,35 @@ check("reconnect clears the timestamp map",
 check("reconnect clears the remembered value",
       c.local_write("1052", "plug0", "State") is None)
 
+# ----- 6. interaction with 429 backoff ----------------------------------
+
+print("\n--- authority window vs rate-limit backoff ---")
+c = make_coordinator([outlet()], scan_interval=60)
+check("60s poll -> 120s window", c._authority_window_s() == 120,
+      f"window={c._authority_window_s()}")
+for _ in range(3):
+    c._rate_limit_backoff(RuntimeError("429"))
+eff = int(c.update_interval.total_seconds())
+check("backoff reached the 300s cap", eff == 300, f"update_interval={eff}")
+check("configured_interval_s is still the user's 60s",
+      c.configured_interval_s == 60, f"configured={c.configured_interval_s}")
+check("window grows with backoff but stops at the 180s cap",
+      c._authority_window_s() == 180, f"window={c._authority_window_s()}")
+# A poll that arrives after the cap is not stale any more -> gateway wins.
+c.remember_local_write("1052", "plug0", "State", "0")
+check("inside 180s cap: our write still wins",
+      c.local_write_recent("1052", "plug0", "State") is True)
+expire(c)
+c._local_write_ts[("1052", "plug0", "State")] = time.monotonic() - 200
+check("past the 180s cap: gateway wins even mid-backoff",
+      c._local_write_wins("1052", "plug0", "State", "1") is False)
+c._restore_poll_interval()
+check("restore returns to 60s, not the backoff value",
+      int(c.update_interval.total_seconds()) == 60,
+      f"update_interval={c.update_interval}")
+check("window back to 120s after restore", c._authority_window_s() == 120,
+      f"window={c._authority_window_s()}")
+
 # ----- summary -----------------------------------------------------------
 
 print()

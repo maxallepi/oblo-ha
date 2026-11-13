@@ -427,8 +427,30 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         if ts is None:
             return False
         if window_s is None:
-            window_s = 2 * getattr(self, "configured_interval_s", 60)
+            window_s = self._authority_window_s()
         return time.monotonic() - ts <= window_s
+
+    def _authority_window_s(self):
+        """Seconds a local write outranks a disagreeing poll.
+
+        Twice the EFFECTIVE poll interval (rate-limit backoff included),
+        capped at AUTHORITY_MAX_S. The effective interval is what matters:
+        during a 429 backoff the next poll arrives at up to 300s, so a window
+        derived from the user's setting alone (120s at 60s polling) would
+        expire before the very poll it exists to absorb -- and the toggle
+        would flip back precisely when the cloud is slow. The cap keeps this
+        from turning into minutes-long local authority: a poll issued 180s
+        after the write is not stale, and if it still disagrees then the
+        write no-opped or someone changed the device elsewhere, so the
+        gateway is right.
+        """
+        base = int(getattr(self, "configured_interval_s", 60) or 60)
+        eff = base
+        try:
+            eff = int(self.update_interval.total_seconds()) or base
+        except (AttributeError, TypeError, ValueError):
+            pass
+        return min(2 * max(base, eff), self.AUTHORITY_MAX_S)
 
     def clear_local_write_authority(self, device_id, service_name, prop):
         """Close the authority window for one prop (a live evt just spoke).
@@ -1344,6 +1366,12 @@ class ObloDataCoordinator(DataUpdateCoordinator):
 
     # ── rate-limit backoff constants ───────────────────────────────────
     RATE_LIMIT_BACKOFF_MAX_S = 300  # 5 min cap
+
+    # ── local-write authority ──────────────────────────────────────────
+    # Hard ceiling for the window in which our write outranks a disagreeing
+    # poll (see _authority_window_s). At 60s polling the window is 120s; a
+    # 300s backoff stretches it to 180s, never further.
+    AUTHORITY_MAX_S = 180
 
     def _rate_limit_backoff(self, err):
         """Increase poll interval exponentially on consecutive 429s."""
