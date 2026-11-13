@@ -8,7 +8,8 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from ..entity_map import entity_name, read_prop
-from ..const import OHM_STATE_ON, OHM_STATE_OFF, OHM_CONFIRM_TIMEOUT_S
+from ..coordinator import write_token_for
+from ..const import OHM_CONFIRM_TIMEOUT_S
 
 
 class ObloSwitch(CoordinatorEntity, SwitchEntity):
@@ -50,16 +51,19 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
         return self.coordinator.ohm is not None and self._service() is not None
 
     async def async_turn_on(self, **kwargs):
-        await self._async_set(OHM_STATE_ON)
+        await self._async_set(True)
 
     async def async_turn_off(self, **kwargs):
-        await self._async_set(OHM_STATE_OFF)
+        await self._async_set(False)
 
-    async def _async_set(self, value):
+    async def _async_set(self, want_on):
         did = self._ent["device_id"]
         svc_name = self._ent["service"]
         prop = self._ent.get("value_prop") or "State"
         svc_type = self._ent.get("service_type")
+        svc = self._service()
+        current = read_prop(svc, prop) if svc else None
+        value = write_token_for(current, want_on)
         res = await self.coordinator.async_write_service_property(
             did, svc_name, prop, value, service_type=svc_type,
             confirm_timeout=OHM_CONFIRM_TIMEOUT_S)

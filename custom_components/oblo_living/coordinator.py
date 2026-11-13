@@ -68,6 +68,41 @@ def values_match(sent, readback):
         return False
 
 
+# Two boolean dialects are in play on this gateway: numeric ("1"/"0") and word
+# ("true"/"false"). The app's own persisted writes (ScenarioDeviceSetting
+# PropValue) use the word form, while ohm.db text can be either. Sending the
+# wrong dialect is refused or silently ignored, and there is exactly one
+# actuator on this hardware to settle it with -- so don't guess: mirror the
+# dialect the device is already reporting.
+_DIALECTS = (
+    ({"1"}, {"0"}),
+    ({"true"}, {"false"}),
+    ({"on"}, {"off"}),
+    ({"yes"}, {"no"}),
+)
+_DEFAULT_ON, _DEFAULT_OFF = "true", "false"
+
+
+def write_token_for(current, want_on):
+    """Return the on/off token in the same dialect as `current`.
+
+    `current` is the device's present value for the property being written.
+    Unknown/absent -> the word form, which is what the OBLO app itself writes.
+
+    This is not cosmetic: a `switch.turn_on` that sends "1" to a device that
+    speaks "true"/"false" produces `confirmed=False` and raises, so a perfectly
+    healthy relay looks broken. Mirroring the observed dialect removes that
+    coin flip without inventing a value the gateway may reject.
+    """
+    cur = "" if current is None else str(current).strip().lower()
+    for on_set, off_set in _DIALECTS:
+        if cur in on_set or cur in off_set:
+            tok_on = next(iter(on_set))
+            tok_off = next(iter(off_set))
+            return tok_on if want_on else tok_off
+    return _DEFAULT_ON if want_on else _DEFAULT_OFF
+
+
 def normalise_ohm_objects(ohm_objects):
     """Convert OHM object_list from cloud MQTT to internal device shape.
 
