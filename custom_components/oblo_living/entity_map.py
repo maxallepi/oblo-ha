@@ -563,6 +563,21 @@ def device_identifier(entry_id, device_id):
     return f"{entry_id or 'unknown'}_{device_id}"
 
 
+def ohm_id_from_identifier(entry_id, identifier):
+    """Inverse of device_identifier(): the bare OHM object id, or None.
+
+    HA's device registry stores the full `device_identifier()` string.
+    Diagnostics and other code need the raw OHM object id (numeric string).
+    """
+    if identifier is None:
+        return None
+    s = str(identifier)
+    prefix = f"{entry_id or 'unknown'}_"
+    if s.startswith(prefix):
+        return s[len(prefix):]
+    return s
+
+
 def gateway_identifier(entry_id):
     """Registry identifier for the gateway device itself."""
     return f"{entry_id or 'unknown'}_gateway"

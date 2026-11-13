@@ -22,8 +22,16 @@ from __future__ import annotations
 
 from homeassistant.components.diagnostics import REDACTED
 
+from .entity_map import ohm_id_from_identifier
+
 # Config entry keys whose existence we report but whose value we never emit.
-SENSITIVE_ENTRY_KEYS = ("secureId", "hash", "secret", "session_id", "password")
+# `identity` is the owner's account email and `username` is
+# "cli/<accountId>-<64-hex session suffix>" -- half a credential. Diagnostics
+# files get attached to public GitHub issues, so both are presence-only: the
+# v0.2.13 leak was a raw dump, and an email in a public issue is the same
+# mistake with a friendlier face.
+SENSITIVE_ENTRY_KEYS = ("secureId", "hash", "secret", "session_id", "password",
+                        "identity", "username")
 
 
 def _entry_summary(entry):
@@ -34,9 +42,8 @@ def _entry_summary(entry):
     """
     data = entry.data or {}
     out = {}
-    # Non-secret connection details.
-    for key in ("host", "port", "username", "certificate", "identity",
-                "scan_interval", "poll_interval"):
+    # Non-secret connection details. Everything here is safe to publish.
+    for key in ("host", "port", "certificate", "scan_interval", "poll_interval"):
         if key in data:
             out[key] = data[key]
     # Secret-bearing keys: presence only.
@@ -123,11 +130,12 @@ async def async_get_device_diagnostics(hass, entry, device):
     """Device-level diagnostics: one device's services and property names."""
     domain_data = (hass.data.get("oblo_living") or {}).get(entry.entry_id) or {}
     coordinator = domain_data.get("coordinator")
-    # HA device ids are strings; OHM object ids are ints in the payload.
+    # The registry stores the entry-scoped identifier ("<entry_id>_1052");
+    # the coordinator's device dicts key on the bare OHM id (1052).
     raw_id = None
     for ident in (device.identifiers or set()):
         if isinstance(ident, (tuple, list)) and len(ident) == 2 and ident[0] == "oblo_living":
-            raw_id = ident[1]
+            raw_id = ohm_id_from_identifier(entry.entry_id, ident[1])
             break
     target = None
     for dev in (getattr(coordinator, "data", None) or []):

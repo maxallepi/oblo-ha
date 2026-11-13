@@ -8,6 +8,7 @@ Three concrete gaps vs Tuya Local:
 Run as: python3 custom_components/oblo_living/tests/parity_tuya_test.py
 """
 import asyncio
+import importlib
 import importlib.util
 import json
 import os
@@ -37,22 +38,19 @@ def check(label, cond, detail=""):
 
 
 def _load_diagnostics():
-    """Load diagnostics.py as a standalone module (no HA package context).
+    """Import diagnostics.py as part of the package.
+
+    It is no longer standalone: it imports entity_map to map the registry's
+    entry-scoped identifier back to a bare OHM id. Loading it by file path
+    bypasses the package and breaks that import, so import it properly.
 
     Returns None when the file is absent, so the negative control ("delete
     diagnostics.py -> the Download diagnostics button disappears") reports a
     clean FAIL instead of an unhandled traceback.
     """
-    path = os.path.join(COMPONENT, "diagnostics.py")
-    if not os.path.exists(path):
+    if not os.path.exists(os.path.join(COMPONENT, "diagnostics.py")):
         return None
-    spec = importlib.util.spec_from_file_location(
-        "oblo_diagnostics_under_test", path)
-    if spec is None or spec.loader is None:
-        return None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return importlib.import_module("custom_components.oblo_living.diagnostics")
 
 
 # --------------------------------------------------------------------------
@@ -252,7 +250,7 @@ def test_device_diagnostics_shape():
         domain = "oblo_living"
 
     class FakeDevice:
-        identifiers = {"test_entry_1052"}
+        identifiers = {("oblo_living", "test_entry_1052")}
         name = "Hallway Lights"
         manufacturer = "Qubino"
         model = "Smart Relay"
