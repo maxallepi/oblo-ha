@@ -227,9 +227,40 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         # generation so an in-flight Sound press can tell it has been
         # superseded and must not go on to write "true".
         self._alert_generation = {}
+        # (device_id, service_name) -> {property_name: value}. Holds the last
+        # value the GATEWAY itself reported for a property (live evt, or the
+        # read-back of a confirmed write). The poll rebuilds the device tree
+        # from OHM/REST payloads, and the gateway does not persist live state
+        # (outlet0/State, both SimpleAlert props have no rows in ohm.db), so a
+        # property present after an evt can be absent one poll later. Without
+        # this overlay the entity falls back to unknown mid-flight; with it the
+        # freshest gateway-sourced value survives until the gateway says
+        # otherwise. Cleared on reconnect: state from before a gap in the
+        # connection is not evidence about now.
+        self._evt_overlay = {}
+
+    def _overlay(self):
+        """Return the gateway-sourced value overlay, creating it on demand.
+
+        Created lazily rather than only in __init__ so a coordinator built
+        without __init__ (test harnesses do this to skip HA's base-class
+        setup) cannot crash the evt handler with an AttributeError.
+        """
+        overlay = getattr(self, "_evt_overlay", None)
+        if overlay is None:
+            overlay = self._evt_overlay = {}
+        return overlay
 
     def set_ohm_client(self, client):
         """Attach the cloud MQTT/OHM client (or None to disable)."""
+        # A new client means a new session. Anything we learned across the gap
+        # may have changed while we were unable to hear the gateway, so the
+        # overlay must not outlive the connection that populated it.
+        if client is None or client is not getattr(self, "ohm", None):
+            if self._overlay():
+                _LOGGER.debug("OBLO evt overlay cleared on reconnect (%d entries)",
+                              len(self._overlay()))
+            self._evt_overlay = {}
         self.ohm = client
 
     def set_scan_interval(self, seconds):
@@ -321,6 +352,10 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("OBLO evt %s at %s device=%s service=%s %s=%r",
                           evt_name, _stamp(), did, svc, prop, val)
         if self._apply_property_change(did, svc, prop, val):
+            # Remember it: the next poll may omit the property entirely (the
+            # gateway does not persist live state), and dropping it would flip
+            # the entity back to unknown seconds after it showed the truth.
+            self._overlay().setdefault((str(did), str(svc)), {})[str(prop)] = val
             # Push the patched device list to entities without waiting for the
             # 60 s poll. No MQTT round-trip, no confirmation semantics.
             self.async_set_updated_data(list(self.data or []))
@@ -466,7 +501,12 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         return result
 
     def _poke_device(self, device_id, service_name, property_name, value):
-        """Update the cached device list so the UI flips without waiting a poll."""
+        """Update the cached device list so the UI flips without waiting a poll.
+
+        Only ever called with a value the gateway itself just returned as the
+        read-back of a confirmed write, which is why it is safe to remember in
+        the overlay exactly like a live evt: both are the gateway speaking.
+        """
         for dev in self.devices or []:
             if dev.get("id") != device_id:
                 continue
@@ -484,6 +524,8 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                             break
                     else:
                         props.append([property_name, value])
+                self._overlay().setdefault(
+                    (str(device_id), str(service_name)), {})[str(property_name)] = value
                 self.data = list(self.devices)
                 return True
         return False
@@ -546,6 +588,37 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("OHM object list failed, using REST data: %s", err)
 
         self.devices = merge_devices(rest_devices, ohm_devices)
+
+        # Re-apply what the gateway last told us for properties this payload
+        # omits. The poll is a snapshot of what the gateway persists, not of
+        # what is true right now, so an absent property is "no information",
+        # not "value cleared" -- and a present one always wins, because it is
+        # fresher than anything we remembered.
+        if self._overlay():
+            applied = 0
+            for dev in self.devices or []:
+                for svc in dev.get("services") or []:
+                    remembered = self._overlay().get(
+                        (str(dev.get("id")), str(svc.get("service"))))
+                    if not remembered:
+                        continue
+                    props = svc.get("props")
+                    if isinstance(props, dict):
+                        for prop_name, value in remembered.items():
+                            if prop_name not in props:
+                                props[prop_name] = value
+                                applied += 1
+                    elif isinstance(props, list):
+                        for prop_name, value in remembered.items():
+                            for pair in props:
+                                if (isinstance(pair, (list, tuple)) and pair
+                                        and str(pair[0]).lower() == prop_name.lower()):
+                                    break
+                            else:
+                                props.append([prop_name, value])
+                                applied += 1
+            if applied:
+                _LOGGER.debug("OBLO poll kept %d evt-confirmed value(s)", applied)
 
         # --- DIAGNOSTIC (v0.2.17) ---
         # The v0.2.13 raw dump printed `secureId` (the AES key seed for local
