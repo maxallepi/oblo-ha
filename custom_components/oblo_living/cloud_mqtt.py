@@ -374,6 +374,21 @@ class ObloCloudMqtt:
     # ------------------------------------------------------------------ #
 
     def _next_uid(self) -> int:
+        """Request uid: a random int in 1..1001, exactly like the SPA.
+
+        The SPA derives it as `Math.floor(1000*Math.random())+1`, so the range
+        is 1..1001 inclusive, and the router drops any message whose uid is
+        falsy -- never return 0 and never return a string. Random rather than
+        sequential so a late reply from a timed-out request cannot resolve a
+        fresh future on a long-lived connection.
+        """
         with self._uid_lock:
+            for _ in range(50):
+                uid = random.randint(1, 1001)
+                if uid not in self._futures:
+                    return uid
+            # 50 collisions against a 1001-slot space means something is off --
+            # fall back to a monotonic value outside the random range so we can
+            # never silently reuse an in-flight uid.
             self._uid_counter += 1
-            return self._uid_counter
+            return 1001 + self._uid_counter
