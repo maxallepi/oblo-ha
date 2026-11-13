@@ -153,6 +153,37 @@ def install():
 
     sw_mod.SwitchEntity = SwitchEntity
 
+    # select platform
+    sel_mod = _mod("homeassistant.components.select", package=True)
+
+    class SelectEntity:
+        _attr_name = None
+        _attr_unique_id = None
+        _attr_should_poll = True
+        _attr_options = []
+
+        @property
+        def current_option(self):
+            raise NotImplementedError
+
+        async def async_select_option(self, option):
+            raise NotImplementedError
+
+    sel_mod.SelectEntity = SelectEntity
+
+    # button platform
+    btn_mod = _mod("homeassistant.components.button", package=True)
+
+    class ButtonEntity:
+        _attr_name = None
+        _attr_unique_id = None
+        _attr_should_poll = False
+
+        async def async_press(self):
+            raise NotImplementedError
+
+    btn_mod.ButtonEntity = ButtonEntity
+
     # const units
     const_mod = _mod("homeassistant.const")
     const_mod.PERCENTAGE = "%"
@@ -172,5 +203,7 @@ def install():
     ha.components.sensor = sensor_mod
     ha.components.binary_sensor = bs_mod
     ha.components.switch = sw_mod
+    ha.components.select = sel_mod
+    ha.components.button = btn_mod
 
 install()

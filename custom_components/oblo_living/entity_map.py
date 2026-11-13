@@ -46,7 +46,8 @@ SERVICE_MAP = {
     "WindService":       ("sensor", None, None, None),
 
     # ── Alert / Safety ──────────────────────────────────────────────────
-    "SimpleAlertService": ("binary_sensor", None, None, "PropAlertStartStop"),
+    # SimpleAlertService removed: it produces TWO entities (select + button).
+    # Defined in MULTI_ENTITY_MAP below.
     "SmokeService":      ("binary_sensor", "smoke", None, "Detected"),
     "FloodService":      ("binary_sensor", "moisture", None, "Detected"),
     "GasService":        ("binary_sensor", "gas", None, "Detected"),
@@ -138,7 +139,7 @@ IGNORED_SERVICES = {
 }
 
 
-# friendly suffix per service, so entity names read "Hallway Motion" not
+# Friendly suffix per service, so entity names read "Hallway Motion" not
 # "Hallway PirService"
 LABELS = {
     "PirService": "Motion", "pir0": "Motion",
@@ -157,6 +158,73 @@ LABELS = {
     "GlassBreakService": "Glass Break", "PressureInfoService": "Leak",
     "FallDetectionService": "Fall",
     "OperationalService": "Online", "WiseDeviceService": "Connection",
+}
+
+
+# ── SimpleAlert: one service, two entities ──────────────────────────────
+# Wire format from app.js:
+#   PropAlertType:      {0:"NOTIFICATION", 1:"ALARM", 2:"WARNING", 3:"EMERGENCY"}
+#   PropAlertStartStop: {true:"ON", false:"OFF"}
+# Both properties absent from ohm.db → initial state unknown.
+# PropAlertStartStop is an EDGE, not a persistent state: the app writes true
+# then false in scenes. A switch would lie by staying "on" after the siren stops.
+# Model it as a button: press = write type, write start, wait, write stop.
+# Write order matters: set type FIRST, then start.
+ALERT_TYPE_LABELS = ("Notification", "Alarm", "Warning", "Emergency")
+ALERT_TYPE_TO_WIRE = {lbl.lower(): str(i) for i, lbl in enumerate(ALERT_TYPE_LABELS)}
+WIRE_TO_ALERT_TYPE = {str(i): lbl for i, lbl in enumerate(ALERT_TYPE_LABELS)}
+ALERT_START_TOKEN = "true"
+ALERT_STOP_TOKEN = "false"
+ALERT_SOUND_S = 10  # how long the siren sounds on a button press
+
+
+def alert_type_label(value):
+    """Wire value -> UI label. Accepts '2', '2', 'warning', 'WARNING'."""
+    v = str(value).strip().lower()
+    if v in WIRE_TO_ALERT_TYPE:
+        return WIRE_TO_ALERT_TYPE[v]
+    for i, lbl in enumerate(ALERT_TYPE_LABELS):
+        if v == lbl.lower():
+            return lbl
+    return value  # unknown -> pass through
+
+
+def alert_type_wire(label):
+    """UI label -> wire value ('2')."""
+    v = str(label).strip().lower()
+    if v in ALERT_TYPE_TO_WIRE:
+        return ALERT_TYPE_TO_WIRE[v]
+    # Also accept the wire value itself if user passed it directly
+    if v in WIRE_TO_ALERT_TYPE:
+        return v
+    raise ValueError(f"unknown alert type: {label!r}")
+
+
+# Services that emit more than one HA entity. Each spec:
+#   platform: "select" | "button"
+#   value_prop: property name in OHM model
+#   suffix: appended to device name for the entity ("Alert Type", "Sound Alert")
+#   options: list of UI option strings (for select only)
+MULTI_ENTITY_MAP = {
+    "SimpleAlertService": [
+        {
+            "platform": "select",
+            "value_prop": "PropAlertType",
+            "suffix": "Type",
+            "options": ALERT_TYPE_LABELS,
+        },
+        {
+            "platform": "button",
+            "value_prop": "PropAlertStartStop",
+            "suffix": "Sound",
+        },
+        {
+            "platform": "button",
+            "value_prop": "PropAlertStartStop",
+            "suffix": "Silence",
+            "action": "stop",
+        },
+    ],
 }
 
 
@@ -192,13 +260,24 @@ def entity_name(dev_name, service):
     return f"{name} {label}"
 
 
+def entity_name_multi(dev_name, suffix):
+    """Name for a multi-entity entry: device name + suffix (deduped)."""
+    name = (dev_name or "").strip() or "OBLO"
+    words = suffix.split()
+    # drop suffix words already present at the end of the device name
+    while words and words[0].lower() in name.lower().split():
+        words.pop(0)
+    rest = " ".join(words)
+    return f"{name} {rest}".strip() if rest else name
+
+
 def read_prop(svc, prop):
     """Read one property from a service dict, tolerantly.
 
     The cloud has been observed to change property casing between endpoints, so
     match exactly first, then case-insensitively. If the requested prop is
     absent entirely, fall back to the first property that looks like a value
-    (so a renamed property still yields an entity instead of None forever).
+    so a renamed property still yields an entity instead of None forever).
     """
     props = dict(svc.get("props") or [])
     if prop is not None and prop in props:
@@ -213,6 +292,25 @@ def read_prop(svc, prop):
             return val
     for val in props.values():
         return val
+    return None
+
+
+def read_prop_strict(svc, prop):
+    """Strict read: returns the property only if it is genuinely present.
+
+    No fallbacks, no fuzzy key search. Returns None if the exact key (or
+    case-insensitive match) is absent. Use for writable/state-critical
+    properties where a fallback would produce garbage (e.g. DeviceType=16
+    being mistaken for State or PropAlertType).
+    """
+    props = dict(svc.get("props") or [])
+    if prop is None:
+        return None
+    if prop in props:
+        return props[prop]
+    for key, val in props.items():
+        if key.lower() == str(prop).lower():
+            return val
     return None
 
 
@@ -231,6 +329,36 @@ def build_entities(devices):
         # canonical spellings win over gateway-backup aliases on the same device
         for svc in sorted(raw, key=lambda s: canonical_service(s["service"]) != s["service"]):
             name = svc["service"]
+            canon = canonical_service(name)
+            # services that expand into several entities (e.g. SimpleAlert:
+            # select + button) are handled before the single-entity map
+            multi = MULTI_ENTITY_MAP.get(name) or MULTI_ENTITY_MAP.get(canon)
+            if multi:
+                if canon in seen:
+                    continue
+                seen.add(canon)
+                props = dict(svc.get("props") or [])
+                for spec in multi:
+                    prop = str(spec.get("value_prop") or "")
+                    out.append({
+                        "device_id": dev["id"],
+                        "class": dev["class"],
+                        "name": dev["name"],
+                        "service": name,
+                        "platform": spec["platform"],
+                        "device_class": None,
+                        "unit": None,
+                        "value_prop": prop,
+                        "state": props.get(prop),
+                        "service_type": svc.get("service_type"),
+                        # multi-entity: suffix keeps names and registry ids apart
+                        "name_suffix": spec.get("suffix"),
+                        "options": spec.get("options"),
+                        "action": spec.get("action") or "press",
+                        "unique_id": (f"oblo_{dev['id']}_{name}_"
+                                      f"{spec['platform']}_{spec.get('suffix')}"),
+                    })
+                continue
             if name not in SERVICE_MAP:
                 continue
             # collapse gateway-backup aliases when the canonical service is also

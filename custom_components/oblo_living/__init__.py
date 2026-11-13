@@ -13,7 +13,7 @@ from .hub import ObloHub
 from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = ["binary_sensor", "sensor", "switch"]
+PLATFORMS = ["binary_sensor", "sensor", "switch", "select", "button"]
 
 
 def _pick_gateway_identity(raw_gateways, api):

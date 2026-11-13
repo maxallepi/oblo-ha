@@ -217,13 +217,18 @@ class ObloDataCoordinator(DataUpdateCoordinator):
     async def async_write_service_property(self, device_id, service_name,
                                            property_name, value,
                                            service_type=None,
-                                           confirm_timeout=2.0):
+                                           confirm_timeout=2.0,
+                                           matcher=None):
         """Write one property, then confirm it by read-back.
 
         Returns {"sent", "readback", "confirmed", "error"} where `confirmed`
         is True only when a read-back matched the sent value, False when the
         gateway answered but the value did not change, and None when the
         read-back itself failed (unknown -- never claim success on unknown).
+
+        `matcher(sent, readback)` overrides the default loose comparison for
+        properties whose wire form and reported form differ (an enum written
+        as "2" can be reported back as "WARNING").
         """
         result = {"sent": value, "readback": None, "confirmed": None,
                   "error": None}
@@ -255,6 +260,7 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         # Read back until it matches or the window closes. A device that
         # acknowledges instantly but reports the old value is a silent no-op,
         # which is the failure mode a bare "command accepted" log would hide.
+        match = matcher or values_match
         deadline = time.monotonic() + max(0.0, confirm_timeout)
         read_err = None
         while True:
@@ -267,7 +273,7 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 read_err = None
             except Exception as err:  # noqa: BLE001
                 read_err = err
-            if read_err is None and values_match(value, result["readback"]):
+            if read_err is None and match(value, result["readback"]):
                 result["confirmed"] = True
                 break
             if time.monotonic() >= deadline:

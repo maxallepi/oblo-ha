@@ -133,8 +133,11 @@ def main():
           len([e for e in switches if e["unique_id"] == "oblo_dev-relay-1_BasicService"]) == 0)
     check("PowerLimitService -> sensor (power)",
           len([e for e in sensors if e["unique_id"] == "oblo_dev-relay-1_PowerLimitService"]) == 1)
-    check("SimpleAlertService -> binary_sensor",
-          len([e for e in bins if e["unique_id"] == "oblo_dev-alert-1_SimpleAlertService"]) == 1)
+    check("SimpleAlertService -> select + 2 buttons",
+          len([e for e in entities if e["device_id"] == "dev-alert-1"
+               and e["service"] == "SimpleAlertService"]) == 3,
+          [(e["service"], e["platform"]) for e in entities
+           if e["device_id"] == "dev-alert-1" and e["service"] == "SimpleAlertService"])
 
     # alias handling: pir0 + PirService on one device must not double up
     alias_dev = [e for e in entities if e["device_id"] == "dev-alias-1"]

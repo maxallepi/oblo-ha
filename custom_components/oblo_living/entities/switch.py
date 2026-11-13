@@ -7,7 +7,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from ..entity_map import entity_name, read_prop
+from ..entity_map import entity_name, read_prop_strict
 from ..coordinator import write_token_for
 from ..const import OHM_CONFIRM_TIMEOUT_S
 
@@ -39,7 +39,7 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
         if svc is None:
             return None
         prop = self._ent.get("value_prop") or "State"
-        val = read_prop(svc, prop)
+        val = read_prop_strict(svc, prop)
         if val is None:
             # Report UNKNOWN, not off. ohm.db carries no State row for a relay
             # (only DeviceType=16), so `State` can be absent from the OHM model
@@ -67,7 +67,7 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
         prop = self._ent.get("value_prop") or "State"
         svc_type = self._ent.get("service_type")
         svc = self._service()
-        current = read_prop(svc, prop) if svc else None
+        current = read_prop_strict(svc, prop) if svc else None
         value = write_token_for(current, want_on)
         res = await self.coordinator.async_write_service_property(
             did, svc_name, prop, value, service_type=svc_type,

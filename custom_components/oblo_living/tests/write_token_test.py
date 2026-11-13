@@ -193,6 +193,22 @@ def test_missing_state_reports_unknown():
     check("absent State key: is_on is None",
           sw2 is not None and sw2.is_on is None, str(sw2 is not None and sw2.is_on))
 
+    # DeviceType=16 present but State absent → strict read returns None, not "16"
+    hass = type("H", (), {"loop": None})()
+    coord3 = ObloDataCoordinator(hass, api=None)
+    coord3.ohm = FakeMqtt(["true"])
+    coord3.devices = [
+        {"id": "1052", "name": "Hallway Lights", "class": "ohm",
+         "services": [{"service": "outlet0", "props": {"DeviceType": "16"},
+                       "service_type": "OutletService"}]},
+    ]
+    coord3.data = list(coord3.devices)
+    sw3 = first_switch(coord3)
+    check("DeviceType garbage: switch still built", sw3 is not None)
+    check("DeviceType garbage: is_on is None (unknown, not off)",
+          sw3 is not None and sw3.is_on is None,
+          str(sw3 is not None and sw3.is_on))
+
 
 def main():
     test_numeric_dialect()
