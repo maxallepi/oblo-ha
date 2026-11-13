@@ -251,6 +251,75 @@ check("restore returns to 60s, not the backoff value",
 check("window back to 120s after restore", c._authority_window_s() == 120,
       f"window={c._authority_window_s()}")
 
+# ----- 7. _prop_seen + note_stale_resurrection --------------------------
+
+print("\n--- prop_seen + resurrection diagnostic ---")
+c = make_coordinator([outlet()], scan_interval=60)
+# simulate a poll that reported State for plug0
+c._note_seen_props([{"id": "1052", "services": [
+    {"name": "plug0", "props": {"DeviceType": "16", "State": "1"}}]}])
+check("State seen after poll reports it",
+      c.prop_ever_reported("1052", "plug0", "State") is True)
+check("never-reported prop returns False",
+      c.prop_ever_reported("1052", "plug0", "Power") is False)
+
+# Reconnect clears _prop_seen
+c.forget_local_writes()
+check("forget_local_writes clears _prop_seen",
+      c.prop_ever_reported("1052", "plug0", "State") is False)
+
+# note_stale_resurrection only logs when prop_ever_reported AND window expired
+import logging, io
+log_stream = io.StringIO()
+h = logging.StreamHandler(log_stream)
+logging.getLogger("custom_components.oblo_living.coordinator").addHandler(h)
+logging.getLogger("custom_components.oblo_living.coordinator").setLevel(logging.WARNING)
+
+c = make_coordinator([outlet(state="1")], scan_interval=60)
+c.remember_local_write("1052", "plug0", "State", "0")
+expire(c)  # window expired
+# Mark as "ever reported"
+c._note_seen_props([{"id": "1052", "services": [
+    {"name": "plug0", "props": {"State": "1"}}]}])
+c.note_stale_resurrection("1052", "plug0", "State")
+log = log_stream.getvalue()
+check("logs WARNING once for resurrected known prop",
+      "stale resurrection" in log.lower() and "plug0" in log, f"log={log!r}")
+# Second call should not log again
+log_stream.seek(0); log_stream.truncate()
+c.note_stale_resurrection("1052", "plug0", "State")
+log = log_stream.getvalue()
+check("second call suppressed", log == "", f"log={log!r}")
+
+# Never-reported prop should not log at WARNING
+log_stream.seek(0); log_stream.truncate()
+c.note_stale_resurrection("1052", "plug0", "Power")
+log = log_stream.getvalue()
+check("never-reported -> no WARNING", log == "", f"log={log!r}")
+
+# --- wiring: is_on's omission path actually calls the diagnostic ---------
+log_stream.seek(0); log_stream.truncate()
+c2 = make_coordinator([outlet(state=None)], scan_interval=60)
+c2._note_seen_props([{"id": "1052", "services": [
+    {"name": "plug0", "props": {"State": "1"}}]}])
+c2.remember_local_write("1052", "plug0", "State", "0")
+expire(c2)
+e2 = ObloSwitch(c2, ent())
+check("omitted prop -> remembered value still shown", e2.is_on is False)
+check("is_on logged the resurrection", "stale resurrection" in log_stream.getvalue().lower(),
+      f"log={log_stream.getvalue()!r}")
+# and a never-reporting service must NOT log
+log_stream.seek(0); log_stream.truncate()
+c3 = make_coordinator([outlet(state=None)], scan_interval=60)
+c3.remember_local_write("1052", "plug0", "State", "0")
+expire(c3)
+e3 = ObloSwitch(c3, ent())
+check("never-reporting service shows remembered value", e3.is_on is False)
+check("never-reporting service stays quiet", log_stream.getvalue() == "",
+      f"log={log_stream.getvalue()!r}")
+
+logging.getLogger("custom_components.oblo_living.coordinator").removeHandler(h)
+
 # ----- summary -----------------------------------------------------------
 
 print()

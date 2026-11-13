@@ -490,6 +490,14 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         self._local_writes = {}
         self._local_write_ts = {}
         self._prop_disagreements = set()
+        # Which (device, service, property) triples this gateway has ever
+        # actually reported. Distinguishes "never reports State" (the relay we
+        # keep a remembered write for, forever) from "usually reports State"
+        # (where an omission is an anomaly worth logging).
+        self._prop_seen = set()
+        # Cleared with the writes: a re-logged resurrection after reconnect is
+        # new information, not noise.
+        self._prop_resurrections = set()
 
     # ── local authority over write-only properties (v0.2.39) ────────────
     # PropAlertType is write-only: the gateway never reports it back. If a
@@ -523,6 +531,68 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             "OBLO: gateway reports %s=%r after our write of %r "
             "(device=%s service=%s) -- write may not have latched",
             prop, gateway_value, local_value, device_id, service_name)
+        return True
+
+    def _note_seen_props(self, devices):
+        """Record which properties this gateway actually reports.
+
+        Feeds prop_ever_reported(). Must be called on the merged device list
+        BEFORE _reapply_overlay(), because the overlay writes our own values
+        into props -- after that pass a property we invented looks reported.
+        """
+        seen = getattr(self, "_prop_seen", None)
+        if seen is None:
+            seen = self._prop_seen = set()
+        added = 0
+        for dev in devices or []:
+            did = str(dev.get("id"))
+            for svc in dev.get("services") or []:
+                sname = str(svc.get("name"))
+                for pname in (svc.get("props") or {}):
+                    key = (did, sname, str(pname))
+                    if key not in seen:
+                        seen.add(key)
+                        added += 1
+        return added
+
+    def prop_ever_reported(self, device_id, service_name, prop):
+        """True if this gateway has ever reported this property for this service.
+
+        A relay whose OHM tree only carries DeviceType never reports State --
+        for those the remembered write is the only truth that exists and it
+        must not expire. A service that HAS reported State and now omits it is
+        a different animal: the omission is an anomaly, and resurrecting a
+        retired write there would show a stale value as fact.
+        """
+        return (str(device_id), str(service_name), str(prop)) in (
+            getattr(self, "_prop_seen", None) or set())
+
+    def note_stale_resurrection(self, device_id, service_name, prop):
+        """Log once when an omission resurrects a write whose window expired.
+
+        switch.is_on has no TTL on the omission path (deliberate: see its
+        comment). For a never-reporting service that is correct. For a service
+        that normally reports the property, an omission after the authority
+        window expired means a retired write is being shown as current -- the
+        one case where the fallback can lie. We do not silently change the
+        behaviour for everyone to cover a gateway that may not exist; we log
+        it once per property so the next poll payload settles the question
+        instead of us guessing.
+        """
+        if not self.prop_ever_reported(device_id, service_name, prop):
+            return False
+        seen = getattr(self, "_prop_resurrections", None)
+        if seen is None:
+            seen = self._prop_resurrections = set()
+        key = (str(device_id), str(service_name), str(prop))
+        if key in seen:
+            return False
+        seen.add(key)
+        _LOGGER.warning(
+            "OBLO: %s omitted %s for device=%s service=%s after our write "
+            "window expired; showing the remembered value (possible stale "
+            "resurrection -- this gateway usually reports the property)",
+            prop, prop, device_id, service_name)
         return True
 
     def push_local_update(self):
@@ -686,6 +756,13 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         self.clear_local_write_authority(did, canon or svc, prop)
         if canon and str(svc) != str(canon):
             self.clear_local_write_authority(did, svc, prop)
+        # Track that this service actually reports this property (evt or poll).
+        # switch.is_on uses this to distinguish "never reports State" (valid
+        # fallback forever) from "usually reports State, then omits" (anomaly).
+        seen = getattr(self, "_prop_seen", None)
+        if seen is None:
+            seen = self._prop_seen = set()
+        seen.add((str(did), str(canon or svc), str(prop)))
         if canon:
             # Remember it under the CANONICAL service instance name, which is
             # what `_reapply_overlay` looks up (the tree's `service` field).
@@ -1059,6 +1136,11 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 "(rest=%d, ohm=%d); entities will be created empty",
                 len(rest_devices or []), len(ohm_devices or []))
             self.devices = fresh
+
+        # Note which properties the gateway actually reports, for the
+        # never-reports-vs-flapping distinction in switch.is_on. Done here,
+        # before _reapply_overlay() writes our own values into props.
+        self._note_seen_props(self.devices)
 
         # Re-apply what the gateway last told us for properties this payload
         # omits. The poll is a snapshot of what the gateway persists, not of

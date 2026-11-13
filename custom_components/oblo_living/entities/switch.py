@@ -53,15 +53,24 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
         prop = self._ent.get("value_prop") or "State"
         val = read_prop_strict(svc, prop) if svc is not None else None
         local = self.coordinator.local_write(did, svc_name, prop)
-        # If the poll has a value but our recent write disagrees, the poll is
-        # stale (hasn't picked up our command yet). Our write wins inside the
-        # authority window. If the poll omits the prop entirely (None), the
-        # remembered write is the only truth available -- keep the original
-        # v0.2.41 behaviour with no TTL on the omission path.
+        # Disagreement + TTL: poll stale -> use local
         if val is not None and local is not None and str(val) != str(local) \
                 and self.coordinator.local_write_recent(did, svc_name, prop):
             val = local
+        # Omission: NO TTL -> fallback to local unconditionally.
+        # This is deliberate for services that NEVER report the property
+        # (e.g., relays whose OHM tree only carries DeviceType). The
+        # remembered write is the only truth that exists, and expiring it
+        # would return Unknown forever.
+        #
+        # For services that HAVE reported the property, an omission after
+        # the authority window expired can resurrect a stale write.
+        # We log this once per property so the question "does this gateway
+        # flap?" is answered from the log instead of guessed.
         if val is None:
+            if local is not None:
+                if not self.coordinator.local_write_recent(did, svc_name, prop):
+                    self.coordinator.note_stale_resurrection(did, svc_name, prop)
             val = local
         if val is None:
             # Report UNKNOWN, not off. Claiming "off" would be a lie in the one
