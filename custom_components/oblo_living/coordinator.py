@@ -577,7 +577,12 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                                            verify=True):
         """Write one property, then confirm it by read-back.
 
-        Returns {"sent", "readback", "confirmed", "error"} where `confirmed`
+        Returns {"sent", "ok", "observed", "readback", "confirmed", "error"}.
+        `ok` is True only if the command reached the gateway (a refusal or a
+        transport error leaves it False). `observed` is True if any read-back
+        returned an actual value -- it is what separates "the gateway does not
+        publish this property" from "the gateway published a value we do not
+        like". `confirmed`
         is True only when a read-back matched the sent value, False when the
         gateway answered but the value did not change, and None when the
         read-back itself failed (unknown -- never claim success on unknown).
@@ -592,8 +597,8 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         them can only return a default, so the "confirmation" would be a lie
         about the write rather than a measurement of it.
         """
-        result = {"sent": value, "readback": None, "confirmed": None,
-                  "error": None}
+        result = {"sent": value, "ok": False, "observed": False,
+                  "readback": None, "confirmed": None, "error": None}
         if self.ohm is None:
             result["error"] = "OHM client not attached (REST-only mode)"
             _LOGGER.warning("OHM write unavailable: %s", result["error"])
@@ -618,6 +623,11 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 "OHM write failed device=%s service=%s property=%s: %s",
                 device_id, service_name, property_name, err)
             return result
+
+        # Reached only when the command was actually handed to the gateway.
+        # `ok` distinguishes "the write went out but we cannot see the result"
+        # (remember it locally) from "the write never happened" (raise).
+        result["ok"] = True
 
         # Verify path: if caller explicitly opts out, the write went out and
         # we have no business pretending to measure something we were told not
@@ -644,6 +654,8 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 read_err = None
             except Exception as err:  # noqa: BLE001
                 read_err = err
+            if read_err is None and result["readback"] is not None:
+                result["observed"] = True
             if read_err is None and match(value, result["readback"]):
                 result["confirmed"] = True
                 break

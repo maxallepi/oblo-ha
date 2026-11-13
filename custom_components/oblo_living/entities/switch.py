@@ -47,17 +47,22 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self):
+        did = self._ent["device_id"]
+        svc_name = self._ent["service"]
         svc = self._service()
-        if svc is None:
-            return None
         prop = self._ent.get("value_prop") or "State"
-        val = read_prop_strict(svc, prop)
+        val = read_prop_strict(svc, prop) if svc is not None else None
         if val is None:
-            # Report UNKNOWN, not off. ohm.db carries no State row for a relay
-            # (only DeviceType=16), so `State` can be absent from the OHM model
-            # entirely. Claiming "off" then would be a lie in the one direction
-            # this component must never lie: a relay that is physically on and
-            # reported as off is worse than one that admits it doesn't know.
+            # No poll row for this property (a relay in ohm.db carries only
+            # DeviceType). Fall back to what WE last asked for -- the gateway
+            # never reports State, so a remembered write is the only truth
+            # available. A poll value always wins when one exists.
+            val = self.coordinator.local_write(did, svc_name, prop)
+        if val is None:
+            # Report UNKNOWN, not off. Claiming "off" would be a lie in the one
+            # direction this component must never lie: a relay that is
+            # physically on and reported as off is worse than one that admits
+            # it doesn't know.
             return None
         s = str(val).strip().lower()
         return s in ("1", "true", "on", "yes")
@@ -84,7 +89,24 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
         res = await self.coordinator.async_write_service_property(
             did, svc_name, prop, value, service_type=svc_type,
             confirm_timeout=OHM_CONFIRM_TIMEOUT_S)
+        if not res.get("ok"):
+            # Never reached the gateway (refused, or transport died). The relay
+            # did not move, so say so instead of flipping the UI.
+            reason = res.get("error") or "write not sent"
+            raise HomeAssistantError(f"OHM write failed: {reason}")
         if not res.get("confirmed"):
-            reason = res.get("error") or "value unchanged"
+            if not res.get("observed"):
+                # The command went out and no read-back ever returned a value
+                # for this property -- unobservable, not refused. Remember what
+                # we asked for so the UI flips now and stays honest until a
+                # poll carries State. (`observed`, not `readback is None`: the
+                # retry loop's last timed-out read overwrites an earlier real
+                # answer with None.)
+                self.coordinator.remember_local_write(did, svc_name, prop, value)
+                self.coordinator.push_local_update()
+                return
+            # The gateway answered with a different value: a real silent no-op.
             raise HomeAssistantError(
-                f"OHM write unconfirmed: {reason}")
+                f"OHM write unconfirmed: gateway reports {res['readback']!r} "
+                f"after {value!r}")
+        # confirmed=True → _poke_device already fired in coordinator
