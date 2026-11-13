@@ -547,8 +547,15 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         for dev in devices or []:
             did = str(dev.get("id"))
             for svc in dev.get("services") or []:
-                sname = str(svc.get("name"))
-                for pname in (svc.get("props") or {}):
+                sname = str(svc.get("service") or svc.get("name") or "")
+                props = svc.get("props") or {}
+                if isinstance(props, dict):
+                    iterable = props
+                elif isinstance(props, list):
+                    iterable = (p[0] for p in props if isinstance(p, (list, tuple)) and p)
+                else:
+                    iterable = ()
+                for pname in iterable:
                     key = (did, sname, str(pname))
                     if key not in seen:
                         seen.add(key)

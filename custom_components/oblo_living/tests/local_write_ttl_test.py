@@ -257,11 +257,44 @@ print("\n--- prop_seen + resurrection diagnostic ---")
 c = make_coordinator([outlet()], scan_interval=60)
 # simulate a poll that reported State for plug0
 c._note_seen_props([{"id": "1052", "services": [
-    {"name": "plug0", "props": {"DeviceType": "16", "State": "1"}}]}])
+    {"service": "plug0", "props": {"DeviceType": "16", "State": "1"}}]}])
 check("State seen after poll reports it",
       c.prop_ever_reported("1052", "plug0", "State") is True)
 check("never-reported prop returns False",
       c.prop_ever_reported("1052", "plug0", "Power") is False)
+
+# --- regression: feed REAL normalise_ohm_objects output, not a hand fixture --
+# @research's probe: production services carry "service", and REST carries props
+# as pair lists. A fixture using "name" passed against a shape that never occurs.
+from custom_components.oblo_living.coordinator import normalise_ohm_objects
+
+real = normalise_ohm_objects([{
+    "id": "1052", "device_name": "Hallway",
+    "service_list": [{"name": "outlet0", "type": "OutletService",
+                      "property_list": [{"name": "PlugState", "value": "1"}]}],
+}])
+c_real = make_coordinator(real, scan_interval=60)
+c_real._note_seen_props(real)
+check("real OHM output keys the instance name, not 'None'",
+      c_real.prop_ever_reported("1052", "outlet0", "State") is True,
+      f"seen={sorted(getattr(c_real, '_prop_seen', set()))}")
+check("no 'None' service key escapes into _prop_seen",
+      not any(k[1] == "None" for k in c_real._prop_seen),
+      f"seen={sorted(c_real._prop_seen)}")
+
+# REST shape: props as pair lists, service key present
+c_rest = make_coordinator([], scan_interval=60)
+c_rest._note_seen_props([{"id": "1052", "services": [{
+    "service": "plug0", "props": [["State", "1"], ["Power", "12"]]}]}])
+check("REST pair-list props recorded by name",
+      c_rest.prop_ever_reported("1052", "plug0", "State") is True,
+      f"seen={sorted(c_rest._prop_seen)}")
+check("REST second pair recorded too",
+      c_rest.prop_ever_reported("1052", "plug0", "Power") is True,
+      f"seen={sorted(c_rest._prop_seen)}")
+check("REST pair-list does not record a stringified pair",
+      not any("State" in str(k[2]) and k[2] != "State" for k in c_rest._prop_seen),
+      f"seen={sorted(c_rest._prop_seen)}")
 
 # Reconnect clears _prop_seen
 c.forget_local_writes()
@@ -280,7 +313,7 @@ c.remember_local_write("1052", "plug0", "State", "0")
 expire(c)  # window expired
 # Mark as "ever reported"
 c._note_seen_props([{"id": "1052", "services": [
-    {"name": "plug0", "props": {"State": "1"}}]}])
+    {"service": "plug0", "props": {"State": "1"}}]}])
 c.note_stale_resurrection("1052", "plug0", "State")
 log = log_stream.getvalue()
 check("logs WARNING once for resurrected known prop",
@@ -301,7 +334,7 @@ check("never-reported -> no WARNING", log == "", f"log={log!r}")
 log_stream.seek(0); log_stream.truncate()
 c2 = make_coordinator([outlet(state=None)], scan_interval=60)
 c2._note_seen_props([{"id": "1052", "services": [
-    {"name": "plug0", "props": {"State": "1"}}]}])
+    {"service": "plug0", "props": {"State": "1"}}]}])
 c2.remember_local_write("1052", "plug0", "State", "0")
 expire(c2)
 e2 = ObloSwitch(c2, ent())
