@@ -37,11 +37,16 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
     def is_on(self):
         svc = self._service()
         if svc is None:
-            return False
+            return None
         prop = self._ent.get("value_prop") or "State"
         val = read_prop(svc, prop)
         if val is None:
-            return False
+            # Report UNKNOWN, not off. ohm.db carries no State row for a relay
+            # (only DeviceType=16), so `State` can be absent from the OHM model
+            # entirely. Claiming "off" then would be a lie in the one direction
+            # this component must never lie: a relay that is physically on and
+            # reported as off is worse than one that admits it doesn't know.
+            return None
         s = str(val).strip().lower()
         return s in ("1", "true", "on", "yes")
 

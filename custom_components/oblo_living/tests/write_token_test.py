@@ -168,6 +168,32 @@ def test_unconfirmed_still_raises():
     check("mismatched read-back raises unconfirmed", raised)
 
 
+def test_missing_state_reports_unknown():
+    # ohm.db has no State row for the relay; the OHM model may omit it entirely.
+    # The entity must say "unknown", never "off".
+    ohm = FakeMqtt(["true"])
+    coord = make_coordinator(ohm, None)
+    sw = first_switch(coord)
+    check("missing State: switch still built", sw is not None)
+    check("missing State: is_on is None (unknown, not off)",
+          sw is not None and sw.is_on is None, str(sw is not None and sw.is_on))
+
+    # ...and the same when the key is absent outright, which is the real shape.
+    hass = type("H", (), {"loop": None})()
+    coord2 = ObloDataCoordinator(hass, api=None)
+    coord2.ohm = FakeMqtt(["true"])
+    coord2.devices = [
+        {"id": "1052", "name": "Hallway Lights", "class": "ohm",
+         "services": [{"service": "outlet0", "props": {},
+                       "service_type": "OutletService"}]},
+    ]
+    coord2.data = list(coord2.devices)
+    sw2 = first_switch(coord2)
+    check("absent State key: switch still built", sw2 is not None)
+    check("absent State key: is_on is None",
+          sw2 is not None and sw2.is_on is None, str(sw2 is not None and sw2.is_on))
+
+
 def main():
     test_numeric_dialect()
     test_word_dialect()
@@ -178,6 +204,7 @@ def main():
     test_switch_speaks_numeric_dialect()
     test_switch_off_mirrors_too()
     test_unconfirmed_still_raises()
+    test_missing_state_reports_unknown()
     bad = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(bad)}/{len(CHECKS)} checks passed")
     return 1 if bad else 0
