@@ -213,6 +213,56 @@ async def test_uid_uniqueness():
     check("uid randomises across clients", c._next_uid() != make_client()[0]._next_uid() or True)
 
 
+async def test_online_event():
+    """gtw_online_status_changed must log even with no evt callback attached.
+
+    It is the only unambiguous cloud->gateway liveness signal: the REST
+    lastTimeStatusUpdated is a *transition* timestamp, not a heartbeat, so a
+    frozen value cannot distinguish a healthy tunnel from a dead one.
+    """
+    import logging
+
+    c, _ = make_client()
+    assert c._evt_cb is None  # no callback yet: logging must still happen
+
+    seen, delivered = [], []
+    h = logging.Handler()
+    h.emit = lambda record: seen.append(record.getMessage())
+    lg = logging.getLogger("oblo_living.cloud_mqtt")
+    lg.addHandler(h)
+    lg.setLevel(logging.WARNING)
+    try:
+        evt = {"name": "gtw_online_status_changed",
+               "params": {"isOnline": True, "serialNumber": "C83DD4300D5B"}}
+        c._on_message(None, None, types.SimpleNamespace(
+            topic="oblo/uid0123456789abcdef/gtw/C83DD4300D5B/sys/evt",
+            payload=json.dumps(evt).encode()))
+        c._on_message(None, None, types.SimpleNamespace(
+            topic="oblo/uid0123456789abcdef/gtw/C83DD4300D5B/ohm/evt",
+            payload=json.dumps({"name": "device_property_changed",
+                                "params": {"value": 1}}).encode()))
+        online = [m for m in seen if "ONLINE_EVENT" in m]
+        check("ONLINE_EVENT logged without an evt callback", len(online) == 1, seen)
+        check("ONLINE_EVENT carries isOnline", any("isOnline=True" in m for m in online), online)
+        check("ONLINE_EVENT carries serial", any("C83DD4300D5B" in m for m in online), online)
+        check("other events do not emit ONLINE_EVENT",
+              not any("ONLINE_EVENT" in m for m in seen
+                      if "device_property_changed" in m), seen)
+
+        # with a callback attached the event must also be delivered
+        c._evt_cb = delivered.append
+        c._loop = asyncio.get_running_loop()
+        c._on_message(None, None, types.SimpleNamespace(
+            topic="oblo/uid0123456789abcdef/gtw/C83DD4300D5B/sys/evt",
+            payload=json.dumps(evt).encode()))
+        await asyncio.sleep(0.02)
+        check("ONLINE_EVENT still delivered to callback", len(delivered) == 1, delivered)
+        check("ONLINE_EVENT now logged twice", len([m for m in seen if "ONLINE_EVENT" in m]) == 2,
+              [m for m in seen if "ONLINE_EVENT" in m])
+    finally:
+        lg.removeHandler(h)
+
+
 def main():
     async def run():
         await test_object_list()
@@ -224,6 +274,7 @@ def main():
         await test_bad_payload()
         await test_sender_paths()
         await test_uid_uniqueness()
+        await test_online_event()
 
     asyncio.run(run())
     failed = CHECKS.count(False)

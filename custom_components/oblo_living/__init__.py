@@ -96,6 +96,7 @@ async def _async_start_ohm(hass, api, coordinator):
 
     try:
         await client.async_connect()
+        await client.async_subscribe_events(lambda p: None)
         coordinator.set_ohm_client(client)
         await coordinator.async_request_refresh()
         _LOGGER.info("OHM connected: devices=%d", len(coordinator.devices))

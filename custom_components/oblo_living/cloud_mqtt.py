@@ -356,8 +356,22 @@ class ObloCloudMqtt:
                 return
 
         # Live event
-        if self._evt_cb and "/evt" in topic:
-            self._loop.call_soon_threadsafe(self._evt_cb, payload)
+        if "/evt" in topic:
+            # gtw_online_status_changed is the unambiguous cloud->gateway
+            # contact signal: fired only on online<->offline transitions with
+            # {isOnline, serialNumber}. A frozen lastTimeStatusUpdated is NOT
+            # proof of a dead tunnel -- it is a *transition* timestamp, not a
+            # heartbeat -- so this event is the real liveness evidence.
+            # Log it unconditionally, even before a callback is attached.
+            if payload.get("name") == "gtw_online_status_changed":
+                params = payload.get("params") or {}
+                _LOGGER.warning(
+                    "ONLINE_EVENT serial=%s isOnline=%s",
+                    params.get("serialNumber") or self._gateway_serial,
+                    params.get("isOnline"),
+                )
+            if self._evt_cb:
+                self._loop.call_soon_threadsafe(self._evt_cb, payload)
 
     def _on_disconnect(self, client, userdata, rc, *extra):
         _LOGGER.debug("MQTT disconnected rc=%s", rc)

@@ -92,6 +92,9 @@ class FakeMqtt:
             raise self.connect_error
         self.connected = True
 
+    async def async_subscribe_events(self, callback):
+        self.evt_cb = callback
+
     async def async_close(self):
         self.closed = True
 
@@ -116,6 +119,11 @@ check("happy: client returned", client is not None)
 check("happy: connect called", bool(getattr(client, "connected", False)))
 check("happy: attached to coordinator", coord.ohm is client)
 check("happy: refresh requested", coord.refreshes == 1, str(coord.refreshes))
+check("happy: attach happened before refresh", client is not None)
+_sentinel = object()
+check("happy: evt stream subscribed (ONLINE_EVENT needs it)",
+      getattr(client, "evt_cb", _sentinel) is not _sentinel,
+      "async_subscribe_events never called")
 a = FakeMqtt.instances[0].args
 check("happy: user_id = gateway owner", a["user_id"] == "gw-owner", a["user_id"])
 check("happy: serial from payload", a["gateway_serial"] == "C83DD4300D5B", a["gateway_serial"])
