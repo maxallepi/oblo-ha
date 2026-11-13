@@ -9,6 +9,7 @@ from homeassistant.helpers.update_coordinator import (
 
 from .cloud_api import (ObloAuthError, ObloCloudApi, ObloCloudError,
                            ObloRateLimitError, normalise_devices)
+from .cloud_mqtt import ObloCommandError
 from .const import DOMAIN, SCAN_INTERVAL_S
 
 
@@ -42,7 +43,8 @@ def normalise_ohm_objects(ohm_objects):
       - service_list: list of {name, category, property_list: [{name, value}]}
 
     Internal device shape (what build_entities consumes):
-      - id, name, class (optional), services: list of {service, props: dict}
+      - id, name, class (optional), services: list of {service, props: dict,
+        service_type: optional canonical type from OHM (category/type)}
     """
     devices = []
     for obj in ohm_objects or []:
@@ -60,7 +62,15 @@ def normalise_ohm_objects(ohm_objects):
                 pval = prop.get("value")
                 if pname:
                     props[pname] = pval
-            services.append({"service": sname, "props": props})
+            # Preserve the canonical type from OHM (category or type) so that
+            # the write path can address a service by type as well as by alias.
+            # Does not affect entity output; tests assert entity count unchanged.
+            service_type = svc.get("type") or svc.get("category")
+            services.append({
+                "service": sname,
+                "props": props,
+                "service_type": service_type,
+            })
         devices.append({
             "id": did,
             "name": obj.get("device_name") or did,
@@ -166,6 +176,13 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 raise
             except ObloRateLimitError:
                 raise
+            except ObloCommandError as err:
+                # The gateway answered and refused (code, message). Distinct line
+                # because this is a device-side answer, not a transport failure --
+                # and it must not be mistaken for "session expired".
+                _LOGGER.warning(
+                    "OHM refused the request (code=%s), using REST data: %s",
+                    getattr(err, "code", None), err)
             except Exception as err:
                 _LOGGER.warning("OHM object list failed, using REST data: %s", err)
 

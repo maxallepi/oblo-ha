@@ -14,7 +14,7 @@ sys.modules.setdefault("oblo_living", _pkg)
 import ha_stub  # noqa: F401
 from oblo_living import cloud_mqtt
 from oblo_living.cloud_api import ObloAuthError
-from oblo_living.cloud_mqtt import ObloCloudMqtt, ObloTimeoutError
+from oblo_living.cloud_mqtt import ObloCloudMqtt, ObloCommandError, ObloTimeoutError
 
 CHECKS = []
 
@@ -102,9 +102,9 @@ async def test_error_code():
     err = None
     try:
         await asyncio.wait_for(task, timeout=5)
-    except ObloAuthError as e:
+    except ObloCommandError as e:
         err = e
-    check("non-zero code -> ObloAuthError with server message",
+    check("non-zero code -> ObloCommandError with server message",
           err is not None and "Privileged mode" in str(err), err)
     await c.async_close()
 
@@ -333,7 +333,7 @@ async def test_generic_command():
     try:
         await asyncio.wait_for(t4, timeout=1)
         check("set raises on non-zero code", False, "returned normally")
-    except ObloAuthError as e:
+    except ObloCommandError as e:
         check("set raises on non-zero code", True, str(e))
 
 

@@ -46,6 +46,23 @@ class ObloTimeoutError(ObloCloudMqttError):
     """Request timed out after retries."""
 
 
+class ObloCommandError(ObloCloudMqttError):
+    """The gateway answered, but with a non-zero code.
+
+    Deliberately NOT an ObloAuthError. The coordinator treats ObloAuthError as
+    "session expired" -> re-login -> and if the re-login is also rejected it
+    raises ConfigEntryAuthFailed, which makes Home Assistant show the reauth
+    form. A device-side rejection ("property not writable", bad value type,
+    unknown service) is not an auth failure, and on the write path that would
+    mean toggling one unsupported switch asks the user for their password.
+    Keep command failures in their own class so they degrade to a warning.
+    """
+
+    def __init__(self, message: str, code: Any = None):
+        super().__init__(message)
+        self.code = code
+
+
 class ObloCloudMqtt:
     """Async wrapper around paho-mqtt for OBLO cloud OHM."""
 
@@ -77,7 +94,8 @@ class ObloCloudMqtt:
         self._gateway_serial = gateway_serial
         self._groups = groups or []
         self._loop = hass_loop or asyncio.get_event_loop()
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="oblo_mqtt")
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._ensure_executor()
 
         self._client: Optional[Any] = None
         self._connected = asyncio.Event()
@@ -132,10 +150,34 @@ class ObloCloudMqtt:
         # account has parentsIds, which is the shared-access case.
         return f"cli/{self._user_id}"
 
+    def _ensure_executor(self) -> ThreadPoolExecutor:
+        """Return a live single-thread executor, rebuilding it if it was shut down.
+
+        async_close() shuts the pool down, and async_connect()/async_close() are
+        called repeatedly over a long-lived config entry. Without this, the first
+        close made every later run_in_executor raise
+        "RuntimeError: cannot schedule new futures after shutdown", so the
+        integration could never reconnect -- it needed an HA restart.
+        """
+        ex = self._executor
+        if ex is None or getattr(ex, "_shutdown", False):
+            ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="oblo_mqtt")
+            self._executor = ex
+        return ex
+
     async def async_connect(self) -> None:
         """Open WSS, MQTT CONNECT, subscribe response topic."""
+        # Only a *connected* client may short-circuit. A client object left
+        # behind by a failed attempt (paho Client is constructed before
+        # connect() is called) used to satisfy `self._client is not None` and
+        # make every later attempt a silent no-op: the integration would then
+        # publish into a dead client and time out forever until HA restarted.
         if self._client is not None:
-            return
+            if self._connected.is_set() and self._conn_error is None:
+                return
+            await self.async_close()
+            self._connected.clear()
+            self._conn_error = None
 
         def _connect_blocking():
             # clientId shape copied from the SPA: "w-" + sessionId + "-" + 1..1000
@@ -181,7 +223,7 @@ class ObloCloudMqtt:
                 self._conn_error = e
                 self._connected.set()
 
-        await self._loop.run_in_executor(self._executor, _connect_blocking)
+        await self._loop.run_in_executor(self._ensure_executor(), _connect_blocking)
 
         # wait for CONNACK
         try:
@@ -249,7 +291,7 @@ class ObloCloudMqtt:
                 raise ObloAuthError("MQTT client not connected")
             try:
                 await self._loop.run_in_executor(
-                    self._executor,
+                    self._ensure_executor(),
                     lambda: client.publish(req_topic, json.dumps(payload), qos=0),
                 )
                 return await asyncio.wait_for(fut, timeout=timeout)
@@ -258,7 +300,11 @@ class ObloCloudMqtt:
                     f"{label} uid={uid} timed out after {timeout}s")
                 _LOGGER.warning("%s attempt %d/%d timed out (uid=%d)",
                                 label, attempt, MAX_RETRIES, uid)
-            except ObloAuthError:
+            except (ObloAuthError, ObloCommandError):
+                # Not transient. An auth failure will not fix itself by
+                # republishing, and a non-zero reply code means the gateway
+                # ANSWERED and refused -- retrying a refused write both wastes
+                # 30s and risks actuating twice. Surface it on the first answer.
                 raise
             except Exception as e:
                 last_err = e
@@ -365,7 +411,7 @@ class ObloCloudMqtt:
             # _subscribe records the mid so the SUBACK line names this topic.
             return self._subscribe(c, evt_topic, 1)
 
-        result = await self._loop.run_in_executor(self._executor, _sub)
+        result = await self._loop.run_in_executor(self._ensure_executor(), _sub)
         # The SUBACK is the line that makes silence interpretable: a clean
         # grant means "subscribed and quiet = healthy steady state", 0x80
         # means we were never allowed to hear the stream.
@@ -383,8 +429,10 @@ class ObloCloudMqtt:
                     pass
                 self._client = None
 
-        await self._loop.run_in_executor(self._executor, _close_blocking)
-        self._executor.shutdown(wait=False)
+        await self._loop.run_in_executor(self._ensure_executor(), _close_blocking)
+        if self._executor is not None:
+            self._executor.shutdown(wait=False)
+            self._executor = None
         self._connected.clear()
         _LOGGER.debug("OBLO cloud MQTT closed")
 
@@ -488,9 +536,14 @@ class ObloCloudMqtt:
                         # key it asked for. Keeps _async_command generic.
                         self._loop.call_soon_threadsafe(fut.set_result, params)
                     else:
+                        # Non-zero reply code = the gateway answered and said no.
+                        # That is a command failure, not an auth failure -- see
+                        # ObloCommandError. Mapping it to ObloAuthError made the
+                        # coordinator re-login (and, on repeat, ask the user for
+                        # a password) because a device refused a value.
                         msg_text = payload.get("message") or f"OHM error code {code}"
                         self._loop.call_soon_threadsafe(
-                            fut.set_exception, ObloAuthError(msg_text)
+                            fut.set_exception, ObloCommandError(msg_text, code)
                         )
                 return
 
