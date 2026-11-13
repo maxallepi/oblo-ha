@@ -7,13 +7,14 @@ may echo the label ("WARNING") while we write the number ("2").
 import logging
 
 from homeassistant.components.select import SelectEntity
+from homeassistant.const import EntityCategory
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from ..entity_map import (
     alert_type_label, alert_type_wire, device_info_fields,
-    entity_name_multi, read_prop_strict,
+    entity_category_attr, entity_label_attr, read_prop_strict,
 )
 from ..const import OHM_CONFIRM_TIMEOUT_S
 
@@ -26,7 +27,13 @@ class ObloAlertTypeSelect(CoordinatorEntity, SelectEntity):
     def __init__(self, coordinator, ent):
         super().__init__(coordinator)
         self._ent = ent
-        self._attr_name = entity_name_multi(ent["name"], ent.get("name_suffix", "Type"))
+        # has_entity_name: per-entity label ("Alert Type"), not per-service --
+        # this service also emits Sound and Silence buttons.
+        self._attr_has_entity_name = True
+        self._attr_name = entity_label_attr(ent)
+        _cat = entity_category_attr(ent)
+        if _cat:
+            self._attr_entity_category = EntityCategory(_cat)
         self._attr_unique_id = ent["unique_id"]
         self._attr_should_poll = False
         self._attr_options = list(ent.get("options") or [])

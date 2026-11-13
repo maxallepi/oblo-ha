@@ -14,13 +14,15 @@ import logging
 from datetime import datetime
 
 from homeassistant.components.button import ButtonEntity
+from homeassistant.const import EntityCategory
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from ..entity_map import (
     alert_type_label, alert_type_wire, ALERT_START_TOKEN, ALERT_STOP_TOKEN,
-    ALERT_SOUND_S, device_info_fields, entity_name_multi, read_prop_strict
+    ALERT_SOUND_S, device_info_fields, entity_category_attr,
+    entity_label_attr, read_prop_strict
 )
 from ..const import OHM_CONFIRM_TIMEOUT_S
 
@@ -38,7 +40,14 @@ class ObloSoundAlertButton(CoordinatorEntity, ButtonEntity):
     def __init__(self, coordinator, ent):
         super().__init__(coordinator)
         self._ent = ent
-        self._attr_name = entity_name_multi(ent["name"], ent.get("name_suffix", "Sound"))
+        # has_entity_name: row reads "Sound" under the device header, not the
+        # full "Gateway Simple Alert 15 Sound". Per-entity label table keeps
+        # this distinct from the sibling Sound/Silence rows.
+        self._attr_has_entity_name = True
+        self._attr_name = entity_label_attr(ent)
+        _cat = entity_category_attr(ent)
+        if _cat:
+            self._attr_entity_category = EntityCategory(_cat)
         self._attr_unique_id = ent["unique_id"]
         self._attr_should_poll = False
         # Shared with the alert-type select and Silence button: one device page.
@@ -164,7 +173,11 @@ class ObloSilenceAlertButton(CoordinatorEntity, ButtonEntity):
     def __init__(self, coordinator, ent):
         super().__init__(coordinator)
         self._ent = ent
-        self._attr_name = entity_name_multi(ent["name"], ent.get("name_suffix", "Silence"))
+        self._attr_has_entity_name = True
+        self._attr_name = entity_label_attr(ent)
+        _cat = entity_category_attr(ent)
+        if _cat:
+            self._attr_entity_category = EntityCategory(_cat)
         self._attr_unique_id = ent["unique_id"]
         self._attr_should_poll = False
         self._attr_device_info = DeviceInfo(**device_info_fields(

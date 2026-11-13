@@ -244,12 +244,28 @@ def install():
     const_mod.STATE_ON = "on"
     const_mod.STATE_OFF = "off"
 
+    class EntityCategory(str):
+        """Mirror of HA's enum: a str subclass, so comparisons stay simple."""
+
+    const_mod.EntityCategory = EntityCategory
+    EntityCategory.DIAGNOSTIC = EntityCategory("diagnostic")
+    EntityCategory.CONFIG = EntityCategory("config")
+
     # wire submodules onto the package
     ha.config_entries = ce
     ha.core = core
     ha.exceptions = exc
     ha.helpers = helpers
     ha.const = const_mod
+    # diagnostics module (used by diagnostics.py's REDACTED sentinel)
+    diag_mod = _mod("homeassistant.components.diagnostics", package=True)
+
+    class REDACTED(str):
+        """Sentinel HA's redaction machinery recognises."""
+        pass
+
+    diag_mod.REDACTED = REDACTED()
+
     ha.components = _mod("homeassistant.components", package=True)
     ha.components.sensor = sensor_mod
     ha.components.binary_sensor = bs_mod

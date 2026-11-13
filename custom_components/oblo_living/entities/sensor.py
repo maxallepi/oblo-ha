@@ -6,12 +6,18 @@ coordinator on every refresh -- no extra wiring needed.
 """
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.const import (
-    PERCENTAGE, UnitOfTemperature, UnitOfPower, LIGHT_LUX,
+    EntityCategory,
+    PERCENTAGE,
+    UnitOfPower,
+    UnitOfTemperature,
+    LIGHT_LUX,
 )
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from ..entity_map import entity_name, device_info_fields, read_prop
+from ..entity_map import (
+    device_info_fields, entity_category_attr, entity_label_attr, read_prop
+)
 
 
 # HA device-class keys (lowercase, as used in entity_map) -> SensorDeviceClass
@@ -40,7 +46,12 @@ class ObloSensor(CoordinatorEntity, SensorEntity):
         # {device_id, name, service, platform, device_class, unit, value_prop, unique_id}
         super().__init__(coordinator)
         self._ent = ent
-        self._attr_name = entity_name(ent["name"], ent["service"])
+        # has_entity_name: device page shows device name as header; row shows short label
+        self._attr_has_entity_name = True
+        self._attr_name = entity_label_attr(ent)
+        _cat = entity_category_attr(ent)
+        if _cat:
+            self._attr_entity_category = EntityCategory(_cat)
         self._attr_unique_id = ent["unique_id"]
         self._attr_device_info = DeviceInfo(**device_info_fields(
             ent, getattr(coordinator, "entry_id", None),

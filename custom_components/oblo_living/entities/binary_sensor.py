@@ -6,10 +6,13 @@ coordinator.data on every access, so a 60s cloud poll refreshes the state.
 from homeassistant.components.binary_sensor import (
     BinarySensorEntity, BinarySensorDeviceClass,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from ..entity_map import entity_name, device_info_fields, read_prop
+from ..entity_map import (
+    device_info_fields, entity_category_attr, entity_label_attr, read_prop
+)
 
 
 DEVICE_CLASS = {
@@ -34,7 +37,16 @@ class ObloBinarySensor(CoordinatorEntity, BinarySensorEntity):
     def __init__(self, coordinator, ent):
         super().__init__(coordinator)
         self._ent = ent
-        self._attr_name = entity_name(ent["name"], ent["service"])
+        # has_entity_name: the device page already shows the device name as a
+        # header, so the entity row carries only its short label ("Outlet",
+        # "Online") instead of repeating "Hallway Lights Outlet" in full.
+        # The label is None when the device name already contains it, which
+        # makes HA use the device name alone -- the old de-duplicated display.
+        self._attr_has_entity_name = True
+        self._attr_name = entity_label_attr(ent)
+        _cat = entity_category_attr(ent)
+        if _cat:
+            self._attr_entity_category = EntityCategory(_cat)
         self._attr_unique_id = ent["unique_id"]
         # Attach to a real device record: without this HA has no device to
         # group the entity under and the integration page shows an empty

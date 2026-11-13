@@ -107,6 +107,14 @@ def run_platform(module_name, devices):
     return added, coord
 
 
+def device_entity_with_contained_label():
+    """entity_label_attr returns None when the device name already has the label."""
+    from custom_components.oblo_living.entity_map import entity_label_attr
+    # device "Hall Motion" + label "Motion" -> None (HA shows "Hall Motion" once)
+    return entity_label_attr({"name": "Hall Motion", "service": "pir0",
+                              "label": "Motion"})
+
+
 def main():
     # 1. every platform named in __init__.PLATFORMS must be an importable module
     init = importlib.import_module("custom_components.oblo_living")
@@ -163,11 +171,39 @@ def main():
     check("door device_class", door._attr_device_class == "door", str(door._attr_device_class))
     check("door is_on False", door.is_on is False, str(door.is_on))
 
-    # 5. no device_info-less name collisions: names are prefixed with device name
-    check("entity names device-prefixed",
-          motion._attr_name == "Hall Motion", str(motion._attr_name))
-    check("entity name does not duplicate the device word",
-          "Motion Motion" not in motion._attr_name, str(motion._attr_name))
+    # 5. has_entity_name: the device page shows the device name as a header and
+    #    the row carries a short label. HA renders "device name + entity name",
+    #    and when the label is already part of the device name we hand HA None
+    #    so it renders the device name alone -- the old de-duplicated display.
+    def display(entity, dev_name):
+        """What HA shows: device name + entity name, or device name if None."""
+        if getattr(entity, "_attr_name", None) is None:
+            return dev_name
+        return f"{dev_name} {entity._attr_name}".strip()
+
+    check("motion has_entity_name", getattr(motion, "_attr_has_entity_name", False) is True)
+    check("door has_entity_name", getattr(door, "_attr_has_entity_name", False) is True)
+    check("temp has_entity_name", getattr(temp, "_attr_has_entity_name", False) is True)
+    check("motion row is None (device name already says Motion)",
+          motion._attr_name is None, str(motion._attr_name))
+    check("door row reads 'Contact'", door._attr_name == "Contact", str(door._attr_name))
+    check("sensor row reads 'Temperature'",
+          temp._attr_name == "Temperature", str(temp._attr_name))
+    check("motion display not doubled",
+          display(motion, "Hall Motion") == "Hall Motion",
+          display(motion, "Hall Motion"))
+    # Label already in the device name -> None -> HA shows the device name only.
+    check("label contained in device name yields None",
+          device_entity_with_contained_label() is None,
+          str(device_entity_with_contained_label()))
+
+    # 6. entity_category: connectivity sensors are diagnostic, controls are not
+    check("temperature sensor is not diagnostic",
+          getattr(temp, "_attr_entity_category", None) is None,
+          str(getattr(temp, "_attr_entity_category", None)))
+    check("motion is not diagnostic",
+          getattr(motion, "_attr_entity_category", None) is None,
+          str(getattr(motion, "_attr_entity_category", None)))
 
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} checks pass")

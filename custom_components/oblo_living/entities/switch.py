@@ -4,11 +4,14 @@ Built from the coordinator data (not the legacy local hub). Uses the OHM
 command path with mandatory read-back confirmation.
 """
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.const import EntityCategory
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from ..entity_map import entity_name, device_info_fields, read_prop_strict
+from ..entity_map import (
+    device_info_fields, entity_category_attr, entity_label_attr, read_prop_strict
+)
 from ..coordinator import write_token_for
 from ..const import OHM_CONFIRM_TIMEOUT_S
 
@@ -19,7 +22,12 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
     def __init__(self, coordinator, ent):
         super().__init__(coordinator)
         self._ent = ent
-        self._attr_name = entity_name(ent["name"], ent["service"])
+        # has_entity_name: device page shows device name as header; row shows short label
+        self._attr_has_entity_name = True
+        self._attr_name = entity_label_attr(ent)
+        _cat = entity_category_attr(ent)
+        if _cat:
+            self._attr_entity_category = EntityCategory(_cat)
         self._attr_unique_id = ent["unique_id"]
         self._attr_should_poll = False
         self._attr_device_info = DeviceInfo(**device_info_fields(

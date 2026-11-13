@@ -159,7 +159,42 @@ LABELS = {
     "GlassBreakService": "Glass Break", "PressureInfoService": "Leak",
     "FallDetectionService": "Fall",
     "OperationalService": "Online", "WiseDeviceService": "Connection",
+
+    # ── Labels for every remaining SERVICE_MAP key ─────────────────────
+    # A service with no entry here renders its Python identifier on the
+    # device page ("WeatherService", "MalfunctionAlarmEventService"). The
+    # test suite asserts every SERVICE_MAP key has a human label, so a new
+    # service cannot ship without one.
+    "WeatherService": "Weather", "WindService": "Wind",
+    "MalfunctionAlarmEventService": "Malfunction Alarm",
+    "SafetyAlarmEventService": "Safety Alarm",
+    "SecurityAlarmEventService": "Security Alarm",
+    "AlarmService": "Alarm",
+    "AirQualityService": "Air Quality",
+    "PressureService": "Pressure",
+    "LightService": "Light", "DimService": "Dimmer", "HueService": "Hue",
+    "ColorService": "Color",
+    "LightColorTemperatureService": "Color Temperature",
+    "DoorLockService": "Lock", "DoorbellService": "Doorbell",
+    "DoorbirdRelayService": "Doorbird Relay",
+    "SecurityButtonService": "Security Button", "ButtonService": "Button",
+    "RollerShutterService": "Shutter",
+    "RollerShutterConfigurationService": "Shutter Configuration",
+    "ThermostatService": "Thermostat", "ThermostatModeService": "Thermostat Mode",
+    "FanService": "Fan",
+    "SnapshotService": "Snapshot", "VRecService": "Recording",
+    "MediaPlaybackService": "Playback", "VolumeService": "Volume",
+    "IRBlasterService": "IR Blaster", "VocoContentService": "TTS",
+    "HueDeviceInfoService": "Device Info",
 }
+
+# Services whose entities are device health, not device controls. HA keeps
+# these off the primary device page under "Diagnostics" -- without the
+# category every OBLO device shows an "Online" row competing with the
+# switch/sensor the user actually came for.
+DIAGNOSTIC_SERVICES = frozenset({
+    "OperationalService", "WiseDeviceService",
+})
 
 
 # ── SimpleAlert: one service, two entities ──────────────────────────────
@@ -261,6 +296,31 @@ def entity_name(dev_name, service):
     return f"{name} {label}"
 
 
+def entity_label_attr(ent):
+    """_attr_name for a has_entity_name=True entity: the short label.
+
+    Returns None when the device name already contains the label, because HA
+    then prefixes the device name itself and the user would read
+    "Hallway Lights Outlet Outlet". None means "use the device name as the
+    entity name", which is exactly the old de-duplicated display.
+    """
+    label = ent.get("label") or entity_label(ent)
+    dev_name = (ent.get("name") or "").strip()
+    if dev_name and (label or "").lower() in dev_name.lower():
+        return None
+    return label
+
+
+def entity_category_attr(ent):
+    """EntityCategory name ("diagnostic") for one entity dict, or None.
+
+    Returns the raw string: entity_map stays free of homeassistant imports so
+    it can be unit-tested without HA. The entity classes wrap it in
+    EntityCategory.
+    """
+    return ent.get("entity_category") or None
+
+
 def entity_name_multi(dev_name, suffix):
     """Name for a multi-entity entry: device name + suffix (deduped)."""
     name = (dev_name or "").strip() or "OBLO"
@@ -270,6 +330,54 @@ def entity_name_multi(dev_name, suffix):
         words.pop(0)
     rest = " ".join(words)
     return f"{name} {rest}".strip() if rest else name
+
+
+# Per-ENTITY labels for has_entity_name devices: what the entity row reads
+# under the device header. Keyed on the multi-entity suffix, NOT on the
+# service, because one service can emit several entities -- SimpleAlertService
+# yields select/Type, button/Sound and button/Silence, and a per-service label
+# would render three identical "Alert" rows the user cannot tell apart.
+MULTI_ENTITY_LABELS = {
+    "Type": "Alert Type",
+    "Sound": "Sound",
+    "Silence": "Silence",
+}
+
+
+def entity_label(ent):
+    """Short label for one entity under a has_entity_name device page.
+
+    Never returns a raw Python identifier: multi-entity rows get the
+    per-entity table, everything else gets the service label table, and any
+    service still missing a label falls back to a spaced-out form of its own
+    name ("MalfunctionAlarmEventService" -> "Malfunction Alarm Event")
+    rather than shipping CamelCase to the UI.
+    """
+    suffix = ent.get("name_suffix")
+    if suffix:
+        return MULTI_ENTITY_LABELS.get(suffix, suffix)
+    label = LABELS.get(ent.get("service"))
+    if label:
+        return label
+    label = LABELS.get(canonical_service(ent.get("service") or ""))
+    if label:
+        return label
+    raw = str(ent.get("service") or "").strip()
+    for tail in ("Service", "EventService"):
+        if raw.endswith(tail):
+            raw = raw[: -len(tail)]
+            break
+    # split CamelCase into words, keep existing acronyms ("IR") intact
+    words, cur = [], ""
+    for ch in raw:
+        if ch.isupper() and cur and not cur[-1].isupper():
+            words.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        words.append(cur)
+    return " ".join(words).strip() or "OBLO"
 
 
 def read_prop(svc, prop):
@@ -553,6 +661,12 @@ def build_entities(devices):
                                       f"{spec['platform']}_{spec.get('suffix')}"),
                         "model": model,
                         "manufacturer": manufacturer,
+                        "label": entity_label({"service": name,
+                                               "name_suffix": spec.get("suffix")}),
+                        "entity_category": ("diagnostic"
+                                            if canon in DIAGNOSTIC_SERVICES
+                                            or name in DIAGNOSTIC_SERVICES
+                                            else None),
                     })
                 continue
             if name not in SERVICE_MAP:
@@ -592,5 +706,10 @@ def build_entities(devices):
                 "unique_id": f"oblo_{dev['id']}_{name}",
                 "model": model,
                 "manufacturer": manufacturer,
+                "label": entity_label({"service": name}),
+                "entity_category": ("diagnostic"
+                                    if canon in DIAGNOSTIC_SERVICES
+                                    or name in DIAGNOSTIC_SERVICES
+                                    else None),
             })
     return out
