@@ -87,15 +87,43 @@ for bad in ([], None, [{}], ["not-a-dict"], [{"service_list": "oops"}], [{"a": [
     except Exception as exc:
         check(f"tolerates {bad!r}", False, f"raised {exc!r}")
 
-print("\n== why the line is needed: the class is dropped on the way in")
+print("\n== what the normaliser forwards (whitelist, option C)")
 norm = normalise_ohm_objects([LEAKY])
 check("normaliser keeps the device", len(norm) == 1)
-check("normaliser replaces the real class with the 'ohm' marker",
-      norm[0]["class"] == "ohm",
-      f"(payload said {'Qubino On/Off Relay'!r}, entity path sees {norm[0]['class']!r})")
+check("a class APP_CLASS_NAMES knows is forwarded, not replaced",
+      norm[0]["class"] == "Qubino On/Off Relay",
+      f"(entity path sees {norm[0]['class']!r})")
 check("normaliser emits no fw_version for the device page",
       "fw_version" not in norm[0] and "FwVersion" not in norm[0],
       "-> sw_version cannot be honest until the DIAG says the payload carries it")
+
+print("\n== the whitelist must never forward a class the app table cannot name")
+
+
+def cls_of(class_value):
+    rec = {"id": "1", "deviceName": "X", "service_list": []}
+    if class_value is not None:
+        rec["class"] = class_value
+    return normalise_ohm_objects([rec])[0]["class"]
+
+
+for raw, why in (
+    (None, "class absent -> marker"),
+    ("", "empty class -> marker"),
+    ("ohm", "already the marker"),
+    ("7", "numeric class id (object 1044) -> marker, never a model string"),
+    ("SSDPController", "internal controller -> marker, no leak onto a page"),
+    ("ZoneController", "internal controller -> marker"),
+    ("SomeVendor Unknown Model", "unknown class -> marker -> service fallback"),
+    ("  Qubino On/Off Relay  ", "known class with padding"),
+):
+    check(f"{why}", cls_of(raw) in ("ohm", "Qubino On/Off Relay"),
+          f"({raw!r} -> {cls_of(raw)!r})")
+check("whitelist is a strict no-op when class is absent",
+      cls_of(None) == "ohm")
+check("whitelist never emits a controller name",
+      all("controller" not in str(cls_of(c)).lower()
+          for c in ("SSDPController", "AlarmController", "NodeOtaController")))
 
 print(f"\n== {checks} checks, {failures} failures")
 sys.exit(1 if failures else 0)

@@ -14,6 +14,7 @@ from .cloud_api import (ObloAuthError, ObloCloudApi, ObloCloudError,
                            ObloRateLimitError, normalise_devices)
 from .cloud_mqtt import ObloCommandError
 from .const import DOMAIN, SCAN_INTERVAL_S
+from .entity_map import APP_CLASS_NAMES
 
 
 def diag_shape(payload):
@@ -182,7 +183,8 @@ def normalise_ohm_objects(ohm_objects):
         devices.append({
             "id": did,
             "name": obj.get("device_name") or did,
-            "class": "ohm",  # mark as OHM-sourced
+            "class": (obj.get("class") if str(obj.get("class") or "")
+                      in APP_CLASS_NAMES else "ohm"),
             "services": services,
         })
     return devices
