@@ -130,6 +130,39 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         rest_devices = merge_devices(normalise_devices(gateways),
                                      normalise_devices(details))
 
+        # --- v0.2.21 machine-readable uplink gate ---
+        # The cloud's own contact record is the only unambiguous uplink signal
+        # we have: the local brokers are ACL-filtered so nothing can be
+        # measured on the LAN, and MQTT 3.1.1 PUBACKs are unconditional.
+        # If lastTimeStatusUpdated stops advancing while connectionStatus
+        # still says "online", that flag is cached and the gateway's OMB
+        # tunnel is dead -- no client change can fix it.
+        # Greppable line: "UPLINK sn=... advanced=... connectionStatus=... lastTimeOnline=... lastTimeStatusUpdated=..."
+        prev = getattr(self, "_last_status", {})
+        cur = {}
+        for gw in (gateways or []):
+            if not isinstance(gw, dict):
+                continue
+            sn = gw.get("serialNumber")
+            ts = gw.get("lastTimeStatusUpdated")
+            cur[sn] = ts
+            if sn not in prev:
+                adv = "first"
+            elif ts != prev.get(sn):
+                adv = "True"
+            else:
+                adv = "False"
+            _LOGGER.warning(
+                "UPLINK sn=%s advanced=%s connectionStatus=%s lastTimeOnline=%s "
+                "lastTimeStatusUpdated=%s",
+                sn,
+                adv,
+                gw.get("connectionStatus"),
+                gw.get("lastTimeOnline"),
+                ts,
+            )
+        self._last_status = cur
+
         # OHM over cloud MQTT is the only source that carries service_list.
         # Failure here must not break the poll -- fall back to REST data and
         # let the next scheduled refresh retry the MQTT round trip.
