@@ -96,13 +96,20 @@ async def main():
     # Serialize to JSON string to search
     serialized = json.dumps(result, default=str)
 
-    # These secret values must NOT appear anywhere
+    # These secret values must NOT appear anywhere.
+    #
+    # `identity` is the account email and `username` is
+    # "cli/<accountId>-<session suffix>" -- the suffix is half a credential.
+    # Diagnostics files get attached to public GitHub issues, so both values
+    # are withheld by policy (presence is still reported).
     SECRETS = [
         "S3CRET-PASSWORD-XYZZY",
         "REAL-SESSION-TOKEN-ABCDEF",
         "ZMUUc1rFXkt5YztwZAA6QNgRpJCkKm1sOABwgSHf",
         "REAL-HASH-VALUE-123456",
         "ANOTHER-REAL-PASSWORD",
+        "user@example.com",
+        "cli/user@example.com",
     ]
 
     for s in SECRETS:
@@ -121,9 +128,17 @@ async def main():
     check("entry summary has password_present=True",
           result["entry"].get("password_present") is True)
 
+    # Identity/username: presence reported, value withheld.
+    check("entry summary has identity_present=True",
+          result["entry"].get("identity_present") is True)
+    check("entry summary has username_present=True",
+          result["entry"].get("username_present") is True)
+    check("entry summary withholds identity value",
+          "identity" not in result["entry"], str(sorted(result["entry"])))
+    check("entry summary withholds username value",
+          "username" not in result["entry"], str(sorted(result["entry"])))
+
     # Non-secret fields must pass through
-    check("entry summary has identity", result["entry"].get("identity") == "user@example.com")
-    check("entry summary has username", result["entry"].get("username") == "cli/user@example.com")
     check("entry summary has scan_interval", result["entry"].get("scan_interval") == 60)
 
     # api summary
