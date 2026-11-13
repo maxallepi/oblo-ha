@@ -404,7 +404,14 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         """Record a value we wrote that the gateway will not read back."""
         if getattr(self, "_local_writes", None) is None:
             self._local_writes = {}
-        self._local_writes[(str(device_id), str(service_name), str(prop))] = value
+        if getattr(self, "_local_write_ts", None) is None:
+            self._local_write_ts = {}
+        key = (str(device_id), str(service_name), str(prop))
+        self._local_writes[key] = value
+        # Timestamp for TTL-based local authority in _reapply_overlay and
+        # switch.is_on fallback. Covers the window until the poll catches up
+        # (2x poll interval) or an evt clears it (fresh gateway truth).
+        self._local_write_ts[key] = time.monotonic()
         return value
 
     def local_write(self, device_id, service_name, prop):
@@ -412,9 +419,54 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         store = getattr(self, "_local_writes", None) or {}
         return store.get((str(device_id), str(service_name), str(prop)))
 
+    def local_write_recent(self, device_id, service_name, prop, window_s=None):
+        """True if we wrote this prop within the authority window."""
+        ts_store = getattr(self, "_local_write_ts", None) or {}
+        key = (str(device_id), str(service_name), str(prop))
+        ts = ts_store.get(key)
+        if ts is None:
+            return False
+        if window_s is None:
+            window_s = 2 * getattr(self, "configured_interval_s", 60)
+        return time.monotonic() - ts <= window_s
+
+    def clear_local_write_authority(self, device_id, service_name, prop):
+        """Close the authority window for one prop (a live evt just spoke).
+
+        Called from handle_event: a live event is fresher than anything we
+        wrote, so it both beats our value AND ends the window. Leaves
+        _local_writes alone -- switch.is_on still needs a fallback for the
+        poll-omits-State case.
+        """
+        ts_store = getattr(self, "_local_write_ts", None)
+        if not ts_store:
+            return False
+        return ts_store.pop((str(device_id), str(service_name),
+                             str(prop)), None) is not None
+
+    def _local_write_wins(self, device_id, service_name, prop, gateway_value):
+        """True when a recent local write should outrank a disagreeing poll.
+
+        The poll taken right after a write is stale by definition: the gateway
+        has not picked the command up yet. Letting that stale value through
+        refreshed the overlay AND left props stale, so every toggle flipped
+        back within one poll cycle. Inside the authority window (2x poll
+        interval) our write wins. When the window expires the gateway wins, so
+        a change made at the wall switch, in the OBLO app, or by another
+        controller is not overridden forever. An evt for the prop closes the
+        window immediately (clear_local_write_authority).
+        """
+        local = self.local_write(device_id, service_name, prop)
+        if local is None:
+            return False
+        if str(gateway_value) == str(local):
+            return False  # agreement is confirmation; nothing to override
+        return self.local_write_recent(device_id, service_name, prop)
+
     def forget_local_writes(self):
         """Drop remembered writes. Called on reconnect: new session, new mood."""
         self._local_writes = {}
+        self._local_write_ts = {}
         self._prop_disagreements = set()
 
     # ── local authority over write-only properties (v0.2.39) ────────────
@@ -605,6 +657,13 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             self._note_gateway_disagreement(did, svc, prop, val, local_val)
             return
         canon = self._apply_property_change(did, svc, prop, val)
+        # A live evt for this prop is fresher than anything we wrote, so it
+        # also closes the local-write authority window -- the next poll is
+        # judged on its own merits again. Cleared under the canonical instance
+        # name (what the write path keys the timestamp with) and the wire name.
+        self.clear_local_write_authority(did, canon or svc, prop)
+        if canon and str(svc) != str(canon):
+            self.clear_local_write_authority(did, svc, prop)
         if canon:
             # Remember it under the CANONICAL service instance name, which is
             # what `_reapply_overlay` looks up (the tree's `service` field).
@@ -1156,14 +1215,19 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         """Re-apply overlay for missing props; refresh remembered for present ones.
 
         For each remembered (device, service, property):
-          - if the poll payload DOES carry the property: update remembered to
-            the payload value (gateway's freshest word) and do NOT count as
-            an overlay application.
+          - if the poll payload DOES carry the property and AGREES with what we
+            last wrote: adopt the payload value (confirmation) and count nothing.
+          - if the payload DOES carry it but DISAGREES while our write is still
+            inside the authority window (2x poll interval): the poll is stale by
+            definition -- force our value into the tree and keep the overlay. A
+            poll taken right after a write has not picked the command up yet;
+            letting it win is what flipped every toggle back a cycle later.
           - if the payload OMITS the property: write the remembered value back
             and count it.
 
         This keeps the overlay invariant: "last value the gateway itself reported"
-        — whether via live evt or a poll that included it.
+        -- whether via live evt or a poll that included it -- except inside the
+        bounded window where a stale poll would otherwise fight the user's write.
 
         Exception: LOCAL_AUTHORITY_PROPS (PropAlertType). The gateway never
         reports those back, so a value that appears in the payload is a
@@ -1213,6 +1277,20 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                         if k is None:
                             props[name] = value
                             applied += 1
+                            continue
+                        # A poll that disagrees with a write we made moments
+                        # ago is stale, not evidence. Force our value into the
+                        # tree (the entity reads props, not the overlay) and
+                        # keep the overlay as-is. Logging the disagreement once
+                        # is the only honest signal that it happened.
+                        did = dev.get("id")
+                        sname = svc.get("service")
+                        if self._local_write_wins(did, sname, name, props[k]):
+                            local_val = self.local_write(did, sname, name)
+                            self._note_gateway_disagreement(
+                                did, sname, name, props[k], local_val)
+                            props[k] = local_val
+                            applied += 1
                         else:
                             remembered[name] = props[k]
                 elif isinstance(props, list):
@@ -1250,7 +1328,18 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                             props.append([name, value])
                             applied += 1
                         else:
-                            remembered[name] = found[1]
+                            did = dev.get("id")
+                            sname = svc.get("service")
+                            if self._local_write_wins(did, sname, name, found[1]):
+                                local_val = self.local_write(did, sname, name)
+                                self._note_gateway_disagreement(
+                                    did, sname, name, found[1], local_val)
+                                # Rebuild rather than mutate: a payload pair
+                                # may be a tuple, which has no __setitem__.
+                                props[props.index(found)] = (found[0], local_val)
+                                applied += 1
+                            else:
+                                remembered[name] = found[1]
         return applied
 
     # ── rate-limit backoff constants ───────────────────────────────────

@@ -52,13 +52,17 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
         svc = self._service()
         prop = self._ent.get("value_prop") or "State"
         val = read_prop_strict(svc, prop) if svc is not None else None
+        local = self.coordinator.local_write(did, svc_name, prop)
+        # If the poll has a value but our recent write disagrees, the poll is
+        # stale (hasn't picked up our command yet). Our write wins inside the
+        # authority window. If the poll omits the prop entirely (None), the
+        # remembered write is the only truth available -- keep the original
+        # v0.2.41 behaviour with no TTL on the omission path.
+        if val is not None and local is not None and str(val) != str(local) \
+                and self.coordinator.local_write_recent(did, svc_name, prop):
+            val = local
         if val is None:
-            # No poll row for this property on this device. The poll may omit
-            # State entirely (ohm.db carries only DeviceType for a relay), or it
-            # may include it. Fall back to what WE last asked for -- a remembered
-            # write is the only truth available when the poll is silent. A poll
-            # value always wins when one exists.
-            val = self.coordinator.local_write(did, svc_name, prop)
+            val = local
         if val is None:
             # Report UNKNOWN, not off. Claiming "off" would be a lie in the one
             # direction this component must never lie: a relay that is

@@ -113,14 +113,24 @@ async def run_tests():
     check("is_on flips to True via remembered write", sw.is_on is True)
     check("remembered write stored", coord.local_write("1052", "OutletService", "State") == "true")
 
-    # 2) Poll value always wins over remembered write
+    # 2) A stale poll must NOT beat a write we just made. The poll taken right
+    #    after a write has not picked the command up yet; letting it win is the
+    #    flicker bug (v0.2.48). Inside the authority window (2x poll interval)
+    #    our value holds; once the window expires the gateway wins, so a change
+    #    made at the wall / OBLO app / another controller is not overridden
+    #    forever. Both halves are asserted -- the second one is what keeps this
+    #    from being unbounded local authority.
+    import time as _time
+
     coord = make_coordinator([make_relay_device(1052)], FakeOhm(readbacks=[None]))
     sw = ObloSwitch(coord, ent)
     await sw.async_turn_on()   # remembered "true"
-    # Simulate a poll that NOW carries State="0" (device actually off)
+    # Simulate a stale poll that still carries State="0" (gateway hasn't caught up)
     coord.devices[0]["services"][0]["props"] = [("DeviceType", "16"), ("State", "0")]
-    # is_on should reflect the poll, not the remembered write
-    check("poll value wins over remembered", sw.is_on is False)
+    check("stale poll does not beat a fresh write", sw.is_on is True)
+    # ... until the window expires, then the gateway value wins
+    coord._local_write_ts[("1052", "OutletService", "State")] = _time.monotonic() - 10_000
+    check("poll value wins once the write window expires", sw.is_on is False)
 
     # 3) Gateway answers a different value -> raises (real silent no-op)
     coord = make_coordinator([make_relay_device(1052)], FakeOhm(readbacks=["0"]))  # readback = 0
