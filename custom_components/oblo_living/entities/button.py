@@ -11,6 +11,7 @@ Two buttons:
 """
 import asyncio
 import logging
+from datetime import datetime
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.exceptions import HomeAssistantError
@@ -24,6 +25,11 @@ from ..entity_map import (
 from ..const import OHM_CONFIRM_TIMEOUT_S
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _stamp():
+    """Millisecond wall clock, for ordering our writes against evt lines."""
+    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
 class ObloSoundAlertButton(CoordinatorEntity, ButtonEntity):
@@ -102,7 +108,12 @@ class ObloSoundAlertButton(CoordinatorEntity, ButtonEntity):
                          "start; not sounding", self._attr_name)
             return
         try:
-            _LOGGER.info("OBLO alert: sounding %s", self._attr_name)
+            # Wall-clock stamp on every alert write so a later evt line can be
+            # ordered against it. @research's one-press test reads these two
+            # lines: a PropAlertStartStop=false evt BEFORE this stop's stamp
+            # proves the gateway self-times-out; no evt proves it does not.
+            _LOGGER.info("OBLO alert: sounding %s (start write at %s)",
+                         self._attr_name, _stamp())
             r = await self.coordinator.async_write_service_property(
                 did, svc_name, "PropAlertStartStop", ALERT_START_TOKEN,
                 service_type=svc_type,
@@ -131,6 +142,8 @@ class ObloSoundAlertButton(CoordinatorEntity, ButtonEntity):
 
     async def _async_stop(self, did, svc_name, svc_type):
         """Write the stop edge and report it. Idempotent by nature."""
+        _LOGGER.info("OBLO alert: stop write at %s (%s)",
+                     _stamp(), self._attr_name)
         r = await self.coordinator.async_write_service_property(
             did, svc_name, "PropAlertStartStop", ALERT_STOP_TOKEN,
             service_type=svc_type,

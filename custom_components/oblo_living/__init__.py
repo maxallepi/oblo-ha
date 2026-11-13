@@ -5,7 +5,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN, CONF_IDENTITY, CONF_SECRET, CONF_SESSION_ID, CONF_USER_ID, CONF_USERNAME, CONF_GROUPS
+from .const import DOMAIN, CONF_IDENTITY, CONF_SECRET, CONF_SESSION_ID, CONF_USER_ID, CONF_USERNAME, CONF_GROUPS, SCAN_INTERVAL_S
 from .cloud_api import ObloCloudApi, ObloCloudError
 from .cloud_mqtt import ObloCloudMqtt
 from .coordinator import ObloDataCoordinator
@@ -97,8 +97,16 @@ async def _async_start_ohm(hass, api, coordinator):
 
     try:
         await client.async_connect()
-        await client.async_subscribe_events(lambda p: None)
         coordinator.set_ohm_client(client)
+        # Subscribe BEFORE the first object_list so a property change that
+        # lands during the initial poll is not lost. Until v0.2.32 this was a
+        # no-op lambda: every event arrived and was thrown away, which is why
+        # nothing in the log ever mentioned a device changing.
+        if await coordinator.async_attach_events():
+            _LOGGER.info("OHM evt subscribed (live property changes will log)")
+        else:
+            _LOGGER.warning("OHM evt not subscribed -- state updates will "
+                            "only arrive on the %ss poll", SCAN_INTERVAL_S)
         await coordinator.async_request_refresh()
         _LOGGER.info("OHM connected: devices=%d", len(coordinator.devices))
         return client

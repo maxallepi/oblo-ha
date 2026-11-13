@@ -4,12 +4,16 @@ Maps the 4-value enum (Notification/Alarm/Warning/Emergency) to a HA Select.
 Uses loose confirmation with label↔number equivalence because the gateway
 may echo the label ("WARNING") while we write the number ("2").
 """
+import logging
+
 from homeassistant.components.select import SelectEntity
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from ..entity_map import alert_type_label, alert_type_wire, entity_name_multi, read_prop_strict
 from ..const import OHM_CONFIRM_TIMEOUT_S
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ObloAlertTypeSelect(CoordinatorEntity, SelectEntity):
@@ -63,6 +67,10 @@ class ObloAlertTypeSelect(CoordinatorEntity, SelectEntity):
             confirm_timeout=OHM_CONFIRM_TIMEOUT_S,
             matcher=lambda s, r: alert_type_label(s) == alert_type_label(r),
         )
-        if not res.get("confirmed"):
+        if res.get("confirmed") is False:
             reason = res.get("error") or "value unchanged"
             raise HomeAssistantError(f"OHM write unconfirmed: {reason}")
+        if res.get("confirmed") is None:
+            # No read-back on this device class (SimpleAlert has no properties
+            # in OHM). The write was sent; we just can't verify it.
+            _LOGGER.info("OHM write sent, no read-back available: PropAlertType=%s", wire)

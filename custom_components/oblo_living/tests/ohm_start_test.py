@@ -59,9 +59,22 @@ class FakeCoordinator:
         self.ohm = None
         self.devices = [{"id": "d1"}]
         self.refreshes = 0
+        self.events_attached = 0
 
     def set_ohm_client(self, client):
         self.ohm = client
+
+    async def async_attach_events(self):
+        # _async_start_ohm subscribes the event stream before the first poll.
+        # Counting here proves the order: subscribe, then refresh.
+        self.events_attached += 1
+        if self.ohm is not None and hasattr(self.ohm, "async_subscribe_events"):
+            await self.ohm.async_subscribe_events(self.handle_event)
+            return True
+        return False
+
+    def handle_event(self, payload):
+        pass
 
     async def async_request_refresh(self):
         self.refreshes += 1
@@ -94,6 +107,11 @@ class FakeMqtt:
         self.connected = True
 
     async def async_subscribe_events(self, callback):
+        # Mirrors cloud_mqtt.async_subscribe_events, which returns early when a
+        # callback is already set. That guard is why a no-op placeholder in
+        # __init__ silently won forever: the real handler never replaced it.
+        if getattr(self, "evt_cb", None) is not None:
+            return (0, self._mid)
         self.evt_cb = callback
         self._mid += 1
         return (0, self._mid)
@@ -122,11 +140,12 @@ check("happy: client returned", client is not None)
 check("happy: connect called", bool(getattr(client, "connected", False)))
 check("happy: attached to coordinator", coord.ohm is client)
 check("happy: refresh requested", coord.refreshes == 1, str(coord.refreshes))
-check("happy: attach happened before refresh", client is not None)
+check("happy: attach happened before refresh", coord.events_attached == 1,
+      f"events_attached={coord.events_attached} refreshes={coord.refreshes}")
 _sentinel = object()
-check("happy: evt stream subscribed (ONLINE_EVENT needs it)",
-      getattr(client, "evt_cb", _sentinel) is not _sentinel,
-      "async_subscribe_events never called")
+check("happy: evt subscribed with the coordinator's handler (not a no-op lambda)",
+      getattr(client, "evt_cb", None) == coord.handle_event,
+      "async_subscribe_events never called, or called with a discarding lambda")
 a = FakeMqtt.instances[0].args
 check("happy: user_id = gateway owner", a["user_id"] == "gw-owner", a["user_id"])
 check("happy: serial from payload", a["gateway_serial"] == "C83DD4300D5B", a["gateway_serial"])

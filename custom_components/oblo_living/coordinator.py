@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import time
+from datetime import datetime
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -38,6 +39,24 @@ def diag_shape(payload):
 
 _TRUE = {"1", "true", "on", "yes"}
 _FALSE = {"0", "false", "off", "no"}
+
+
+def _stamp():
+    """Millisecond wall clock, so our writes and inbound evt lines can be ordered."""
+    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+
+def _first(params, keys):
+    """First present, non-None value among `keys` in a dict. None if absent.
+
+    Event payload key names are not documented; the SPA and the gateway are not
+    guaranteed to agree on camelCase. Rather than pick one and silently match
+    nothing, accept the plausible spellings and report which ones we tried.
+    """
+    for key in keys:
+        if key in params and params[key] is not None:
+            return params[key]
+    return None
 
 
 def _norm_boolish(v):
@@ -230,6 +249,82 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         gen = self._alert_generation.get(key, 0) + 1
         self._alert_generation[key] = gen
         return gen
+
+    # ── gateway events ──────────────────────────────────────────────────
+    # The gateway publishes live changes on oblo/<uid>/gtw/<SN>/+/evt. Until
+    # v0.2.32 nothing consumed them: _async_start_ohm subscribed with a
+    # no-op lambda, so every event was received and dropped. That also made
+    # one question unanswerable -- whether the gateway ends a siren on its
+    # own. Every event is now logged with a millisecond stamp, so our own
+    # write lines and an incoming PropAlertStartStop=false can be ordered.
+    async def async_attach_events(self):
+        """Subscribe the coordinator to gateway events (idempotent, best-effort)."""
+        if self.ohm is None:
+            return False
+        subscribe = getattr(self.ohm, "async_subscribe_events", None)
+        if subscribe is None:
+            return False
+        try:
+            await subscribe(self.handle_event)
+            return True
+        except Exception as err:  # noqa: BLE001 - events are a bonus, not setup
+            _LOGGER.warning("OBLO evt subscribe failed: %s", err)
+            return False
+
+    def handle_event(self, payload):
+        """Apply one gateway event. Runs on the HA loop via call_soon_threadsafe."""
+        if not isinstance(payload, dict):
+            _LOGGER.debug("OBLO evt (non-dict): %r", payload)
+            return
+        evt_name = payload.get("name") or payload.get("type") or "?"
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        prop = _first(params, ("propertyName", "property", "property_name", "prop"))
+        if prop is None:
+            # Not a property change (online status, config, ...). Keep it quiet
+            # unless someone is debugging.
+            _LOGGER.debug("OBLO evt %s at %s keys=%s",
+                          evt_name, _stamp(),
+                          sorted(params) if params else sorted(payload))
+            return
+        did = _first(params, ("deviceId", "device_id", "objId", "objectId", "id"))
+        svc = _first(params, ("serviceName", "service", "service_name"))
+        val = _first(params, ("value", "newValue", "new_value", "val"))
+        # Alert properties are logged at INFO: they are the only live proof we
+        # can get that a siren started or stopped on the gateway's own terms.
+        if str(prop).startswith("PropAlert"):
+            _LOGGER.info("OBLO evt %s at %s device=%s service=%s %s=%r",
+                         evt_name, _stamp(), did, svc, prop, val)
+        else:
+            _LOGGER.debug("OBLO evt %s at %s device=%s service=%s %s=%r",
+                          evt_name, _stamp(), did, svc, prop, val)
+        if self._apply_property_change(did, svc, prop, val):
+            # Push the patched device list to entities without waiting for the
+            # 60 s poll. No MQTT round-trip, no confirmation semantics.
+            self.async_set_updated_data(list(self.data or []))
+
+    def _apply_property_change(self, did, svc_name, prop, value):
+        """Write one property change into the cached device tree.
+
+        Returns True when something actually changed, so we only notify
+        entities on a real update.
+        """
+        if did is None or prop is None:
+            return False
+        devices = self.data or []
+        for dev in devices:
+            if str(dev.get("id")) != str(did):
+                continue
+            for svc in dev.get("services") or []:
+                if svc_name is not None and str(svc.get("service")) != str(svc_name):
+                    continue
+                props = svc.get("props")
+                if not isinstance(props, dict):
+                    continue
+                if str(props.get(prop)) == str(value):
+                    return False
+                props[prop] = value
+                return True
+        return False
 
     async def async_stop_active_alerts(self):
         """Best-effort teardown: undo every in-flight actuation."""
