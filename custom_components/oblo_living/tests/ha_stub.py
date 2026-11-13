@@ -100,6 +100,35 @@ def install():
     aio = _mod("homeassistant.helpers.aiohttp_client")
     aio.async_get_clientsession = MagicMock()
 
+    # device registry: entities declare DeviceInfo so HA groups them onto a
+    # device page. The stub keeps every DeviceInfo it is given and records
+    # async_get_or_create calls, so a test can assert the gateway device and
+    # the per-device identifiers actually reach the registry.
+    devreg = _mod("homeassistant.helpers.device_registry")
+
+    class DeviceInfo(dict):
+        """Dict with attribute access, like HA's DeviceInfo TypedDict."""
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class DeviceRegistry:
+        def __init__(self):
+            self.created = []
+
+        def async_get_or_create(self, **kwargs):
+            self.created.append(kwargs)
+            return kwargs
+
+    _REGISTRY = DeviceRegistry()
+    devreg.DeviceInfo = DeviceInfo
+    devreg.async_get = lambda hass: _REGISTRY
+    devreg.DeviceRegistry = DeviceRegistry
+    devreg._REGISTRY = _REGISTRY
+    helpers.device_registry = devreg
+
     util = _mod("homeassistant.util")
     util.dt = MagicMock()
 

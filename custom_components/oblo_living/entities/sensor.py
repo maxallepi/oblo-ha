@@ -8,9 +8,10 @@ from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.const import (
     PERCENTAGE, UnitOfTemperature, UnitOfPower, LIGHT_LUX,
 )
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from ..entity_map import entity_name, read_prop
+from ..entity_map import entity_name, device_info_fields, read_prop
 
 
 # HA device-class keys (lowercase, as used in entity_map) -> SensorDeviceClass
@@ -41,6 +42,9 @@ class ObloSensor(CoordinatorEntity, SensorEntity):
         self._ent = ent
         self._attr_name = entity_name(ent["name"], ent["service"])
         self._attr_unique_id = ent["unique_id"]
+        self._attr_device_info = DeviceInfo(**device_info_fields(
+            ent, getattr(coordinator, "entry_id", None),
+            getattr(coordinator, "gateway_serial", None)))
         if ent.get("device_class"):
             self._attr_device_class = DEVICE_CLASS.get(ent["device_class"])
         if ent.get("unit"):

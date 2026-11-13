@@ -12,6 +12,7 @@ from .const import (DOMAIN, CONF_IDENTITY, CONF_SECRET, CONF_SESSION_ID,
 from .cloud_api import ObloCloudApi, ObloCloudError
 from .cloud_mqtt import ObloCloudMqtt
 from .coordinator import ObloDataCoordinator
+from .entity_map import gateway_identifier, MANUFACTURER
 from .hub import ObloHub
 from .services import async_register_services
 
@@ -127,6 +128,33 @@ async def _async_start_ohm(hass, api, coordinator):
     return None
 
 
+def _async_register_gateway_device(hass, entry, serial):
+    """Create/update the gateway's own device record.
+
+    Entities declare `via_device` pointing at this record so the device page
+    shows "Connected via OBLO Gateway ..." instead of every device sitting at
+    the top level. Registration is best-effort: a gateway device is a nicety,
+    and a registry problem must never fail setup (the entities themselves are
+    the integration's actual job).
+    """
+    try:
+        from homeassistant.helpers import device_registry as dr
+
+        registry = dr.async_get(hass)
+        name = f"OBLO Gateway {serial}" if serial else "OBLO Gateway"
+        return registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, gateway_identifier(entry.entry_id))},
+            manufacturer=MANUFACTURER,
+            model="OBLO Living Gateway",
+            name=name,
+            serial_number=serial or None,
+        )
+    except Exception as err:  # noqa: BLE001 - never fail setup
+        _LOGGER.debug("gateway device not registered: %s", err)
+        return None
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up OBLO Living from a config entry (cloud mode)."""
     # build cloud API from stored credentials. CONF_SECRET holds the PLAINTEXT
@@ -150,9 +178,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # round trips and this API has already rate-limited the account once.
     scan_interval = entry.options.get(
         CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S)
-    coordinator = ObloDataCoordinator(hass, api, scan_interval=scan_interval)
+    coordinator = ObloDataCoordinator(hass, api, scan_interval=scan_interval,
+                                      entry_id=entry.entry_id)
     await coordinator.async_config_entry_first_refresh()
     _LOGGER.info("cloud session=%s devices=%d", api.session_id, len(coordinator.devices))
+
+    # Gateway device for via_device (entities point at it so the device page
+    # groups them under "Connected via OBLO Gateway ...")
+    _async_register_gateway_device(hass, entry, coordinator.gateway_serial)
 
     # persist what we learned so a restart does not need a fresh login
     # (OHM needs username+groups; a cached session alone does not carry them)

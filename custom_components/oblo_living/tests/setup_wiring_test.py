@@ -41,7 +41,7 @@ class FakeCoordinator:
 
     made = []
 
-    def __init__(self, hass, api, scan_interval=60):
+    def __init__(self, hass, api, scan_interval=60, entry_id=None):
         self.hass = hass
         self.api = api
         self.scan_interval = scan_interval
@@ -49,6 +49,8 @@ class FakeCoordinator:
         self.devices = []
         self.refreshed = 0
         self.ohm = None
+        self.entry_id = entry_id
+        self.gateway_serial = None
         FakeCoordinator.made.append(self)
 
     async def async_config_entry_first_refresh(self):

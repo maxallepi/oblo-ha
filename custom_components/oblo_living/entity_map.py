@@ -4,6 +4,7 @@ Built from the OBLO app's canonical service catalog (oblo_service_property_catal
 which is what /udm/device/hg/info/list returns. Gateway backup numbered variants
 (pir0, temperature0, outlet0, etc.) are kept as aliases for local MQTT compatibility.
 """
+from .const import DOMAIN
 
 # service name -> (platform, device_class, unit, value_property)
 SERVICE_MAP = {
@@ -248,7 +249,7 @@ ALIASES = {
 
 def canonical_service(service):
     """Canonical name for a service, collapsing gateway-backup aliases."""
-    return ALIASES.get(service, service)
+    return ALIASES.get(service, service) or service
 
 
 def entity_name(dev_name, service):
@@ -295,6 +296,98 @@ def read_prop(svc, prop):
     return None
 
 
+# ── Device registry metadata ────────────────────────────────────────────
+# HA core only shows an integration's device list when entities declare
+# DeviceInfo. Without it every entity is orphaned: it appears in the entity
+# list but belongs to no device, so the integration page has nothing to group
+# and shows an empty device section (this is what the Tuya Local page shows
+# and what OBLO was missing).
+MANUFACTURER = "OBLO Living"
+
+# Device model as shown on the device page. Derived from the services the
+# device actually exposes -- OHM-sourced devices report class "ohm", which is
+# a source marker, not hardware.
+MODEL_BY_SERVICE = {
+    "OutletService": "Smart Relay",
+    "outlet0": "Smart Relay",
+    "BasicService": "Smart Relay",
+    "basic0": "Smart Relay",
+    "SimpleAlertService": "Alert Siren",
+    "PirService": "Motion Sensor",
+    "pir0": "Motion Sensor",
+    "ContactService": "Door / Window Sensor",
+    "TemperatureService": "Temperature Sensor",
+    "temperature0": "Temperature Sensor",
+    "HumidityService": "Humidity Sensor",
+    "LightIntensityService": "Light Sensor",
+    "lightIntensity0": "Light Sensor",
+    "PowerConsumptionService": "Power Meter",
+    "power0": "Power Meter",
+    "SmokeService": "Smoke Detector",
+    "FloodService": "Flood Detector",
+    "GasService": "Gas Detector",
+    "DoorLockService": "Door Lock",
+    "WeatherService": "Weather Station",
+}
+
+
+def device_model(service_names, dev_class=None):
+    """Best hardware description for a device from the services it exposes.
+
+    Service order matters: the first service with a known model wins, so a
+    device that is mostly a relay is described as a relay even if it also has
+    a metering service.
+    """
+    for name in service_names:
+        model = MODEL_BY_SERVICE.get(str(name)) or MODEL_BY_SERVICE.get(
+            canonical_service(str(name)))
+        if model:
+            return model
+    # Fall back to a real class string; never surface the "ohm" source marker.
+    cls = str(dev_class or "").strip()
+    if cls and cls.lower() != "ohm":
+        return cls
+    return "OBLO Device"
+
+
+def device_identifier(entry_id, device_id):
+    """Registry identifier for one OBLO device.
+
+    Entry-scoped on purpose: OHM object ids are small integers ("1052") and
+    two gateways on the same account can legitimately both have a "1052".
+    A bare id as identifier would merge two physical devices into one.
+    """
+    return f"{entry_id or 'unknown'}_{device_id}"
+
+
+def gateway_identifier(entry_id):
+    """Registry identifier for the gateway device itself."""
+    return f"{entry_id or 'unknown'}_gateway"
+
+
+def device_info_fields(ent, entry_id=None, gateway_serial=None):
+    """Plain-dict DeviceInfo payload for one entity's device.
+
+    Returned as a dict so the mapping layer stays free of HA imports (tests
+    drive entity_map without HA installed); entity classes build DeviceInfo
+    from it. Every entity of one device gets the same identifiers set, which
+    is what groups them onto a single device page.
+    """
+    did = ent.get("device_id")
+    fields = {
+        "identifiers": {(DOMAIN, device_identifier(entry_id, did))},
+        "name": (ent.get("name") or str(did) or "OBLO").strip(),
+        "manufacturer": MANUFACTURER,
+        "model": ent.get("model") or "OBLO Device",
+    }
+    serial = str(ent.get("gateway") or gateway_serial or "").strip()
+    if serial:
+        # Shows as "Connected via <gateway>" on the device page. The gateway
+        # device is registered during setup; without that this would dangle.
+        fields["via_device"] = (DOMAIN, gateway_identifier(entry_id))
+    return fields
+
+
 def read_prop_strict(svc, prop):
     """Strict read: returns the property only if it is genuinely present.
 
@@ -325,6 +418,9 @@ def build_entities(devices):
         present = {s["service"] for s in raw}
         present_canon = {canonical_service(n) for n in present}
         is_relay = "relay" in (dev.get("class") or "").lower()
+        # Device-page metadata, computed once per device: every entity of this
+        # device must carry the same model or HA shows a split device record.
+        model = device_model([s["service"] for s in raw], dev.get("class"))
         seen = set()
         # canonical spellings win over gateway-backup aliases on the same device
         for svc in sorted(raw, key=lambda s: canonical_service(s["service"]) != s["service"]):
@@ -357,6 +453,7 @@ def build_entities(devices):
                         "action": spec.get("action") or "press",
                         "unique_id": (f"oblo_{dev['id']}_{name}_"
                                       f"{spec['platform']}_{spec.get('suffix')}"),
+                        "model": model,
                     })
                 continue
             if name not in SERVICE_MAP:
@@ -394,5 +491,6 @@ def build_entities(devices):
                 # for REST-sourced devices, which never expose a type.
                 "service_type": svc.get("service_type"),
                 "unique_id": f"oblo_{dev['id']}_{name}",
+                "model": model,
             })
     return out

@@ -6,9 +6,10 @@ coordinator.data on every access, so a 60s cloud poll refreshes the state.
 from homeassistant.components.binary_sensor import (
     BinarySensorEntity, BinarySensorDeviceClass,
 )
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from ..entity_map import entity_name, read_prop
+from ..entity_map import entity_name, device_info_fields, read_prop
 
 
 DEVICE_CLASS = {
@@ -35,6 +36,12 @@ class ObloBinarySensor(CoordinatorEntity, BinarySensorEntity):
         self._ent = ent
         self._attr_name = entity_name(ent["name"], ent["service"])
         self._attr_unique_id = ent["unique_id"]
+        # Attach to a real device record: without this HA has no device to
+        # group the entity under and the integration page shows an empty
+        # device list. Redacted nothing here -- identifiers/name/model only.
+        self._attr_device_info = DeviceInfo(**device_info_fields(
+            ent, getattr(coordinator, "entry_id", None),
+            getattr(coordinator, "gateway_serial", None)))
         if ent.get("device_class"):
             # getattr: tolerate HA builds that lack a given device class
             self._attr_device_class = DEVICE_CLASS.get(ent["device_class"])

@@ -8,9 +8,13 @@ import logging
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from ..entity_map import alert_type_label, alert_type_wire, entity_name_multi, read_prop_strict
+from ..entity_map import (
+    alert_type_label, alert_type_wire, device_info_fields,
+    entity_name_multi, read_prop_strict,
+)
 from ..const import OHM_CONFIRM_TIMEOUT_S
 
 _LOGGER = logging.getLogger(__name__)
@@ -26,6 +30,10 @@ class ObloAlertTypeSelect(CoordinatorEntity, SelectEntity):
         self._attr_unique_id = ent["unique_id"]
         self._attr_should_poll = False
         self._attr_options = list(ent.get("options") or [])
+        # Same identifiers as the Sound/Silence buttons -> one device page.
+        self._attr_device_info = DeviceInfo(**device_info_fields(
+            ent, getattr(coordinator, "entry_id", None),
+            getattr(coordinator, "gateway_serial", None)))
 
     def _service(self):
         """Find this entity's service dict in the latest coordinator data."""

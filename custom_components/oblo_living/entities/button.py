@@ -15,12 +15,12 @@ from datetime import datetime
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from ..entity_map import (
-    alert_type_label, alert_type_wire,
-    ALERT_START_TOKEN, ALERT_STOP_TOKEN, ALERT_SOUND_S,
-    entity_name_multi, read_prop_strict
+    alert_type_label, alert_type_wire, ALERT_START_TOKEN, ALERT_STOP_TOKEN,
+    ALERT_SOUND_S, device_info_fields, entity_name_multi, read_prop_strict
 )
 from ..const import OHM_CONFIRM_TIMEOUT_S
 
@@ -41,6 +41,10 @@ class ObloSoundAlertButton(CoordinatorEntity, ButtonEntity):
         self._attr_name = entity_name_multi(ent["name"], ent.get("name_suffix", "Sound"))
         self._attr_unique_id = ent["unique_id"]
         self._attr_should_poll = False
+        # Shared with the alert-type select and Silence button: one device page.
+        self._attr_device_info = DeviceInfo(**device_info_fields(
+            ent, getattr(coordinator, "entry_id", None),
+            getattr(coordinator, "gateway_serial", None)))
 
     def _service(self):
         did = self._ent["device_id"]
@@ -163,6 +167,9 @@ class ObloSilenceAlertButton(CoordinatorEntity, ButtonEntity):
         self._attr_name = entity_name_multi(ent["name"], ent.get("name_suffix", "Silence"))
         self._attr_unique_id = ent["unique_id"]
         self._attr_should_poll = False
+        self._attr_device_info = DeviceInfo(**device_info_fields(
+            ent, getattr(coordinator, "entry_id", None),
+            getattr(coordinator, "gateway_serial", None)))
 
     def _service(self):
         did = self._ent["device_id"]

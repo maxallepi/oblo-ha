@@ -5,9 +5,10 @@ command path with mandatory read-back confirmation.
 """
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from ..entity_map import entity_name, read_prop_strict
+from ..entity_map import entity_name, device_info_fields, read_prop_strict
 from ..coordinator import write_token_for
 from ..const import OHM_CONFIRM_TIMEOUT_S
 
@@ -21,6 +22,9 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
         self._attr_name = entity_name(ent["name"], ent["service"])
         self._attr_unique_id = ent["unique_id"]
         self._attr_should_poll = False
+        self._attr_device_info = DeviceInfo(**device_info_fields(
+            ent, getattr(coordinator, "entry_id", None),
+            getattr(coordinator, "gateway_serial", None)))
 
     def _service(self):
         """Find this entity's service dict in the latest coordinator data."""

@@ -200,13 +200,18 @@ class ObloDataCoordinator(DataUpdateCoordinator):
     """Polls the cloud for gateway + device state, re-authenticating on expiry."""
 
     def __init__(self, hass: HomeAssistant, api: ObloCloudApi,
-                 scan_interval: int = SCAN_INTERVAL_S):
+                 scan_interval: int = SCAN_INTERVAL_S,
+                 entry_id: str | None = None):
         """scan_interval is the poll period in seconds (options flow, min 15).
 
         The poll is a safety net: gateway events patch the cache as they
         arrive. Each poll is three round trips against a cloud API that has
         already rate-limited this account once, so the caller passes the
         configured interval rather than a hard constant.
+
+        entry_id is passed by async_setup_entry so entities can build
+        entry-scoped device identifiers (prevents two gateways from
+        colliding on the same OHM object id like "1052").
         """
         super().__init__(
             hass, _LOGGER, name=f"{DOMAIN}_coordinator",
@@ -214,6 +219,8 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 seconds=int(scan_interval)))
         self.api = api
         self.devices = []
+        self.entry_id = entry_id
+        self.gateway_serial = None
         # Optional cloud MQTT/OHM client. REST only returns the gateway object;
         # the device inventory with service_list lives behind OHM commands, so
         # when a client is attached its object_list is merged in and wins on
@@ -554,6 +561,12 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         # in cloud_mqtt._on_message.
         for gw in (gateways or []):
             if isinstance(gw, dict):
+                # Remember the gateway serial: entities use it as via_device so
+                # the device page shows them as "connected via" the gateway.
+                sn = (gw.get("serialNumber") or gw.get("serial")
+                      or gw.get("sn") or gw.get("deviceSN"))
+                if sn and not self.gateway_serial:
+                    self.gateway_serial = str(sn)
                 _LOGGER.debug(
                     "UPLINK sn=%s connectionStatus=%s lastTimeOnline=%s "
                     "lastTimeStatusUpdated=%s (transition timestamp, not a heartbeat)",
