@@ -570,11 +570,11 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         if local_val is not None and str(val) != str(local_val):
             self._note_gateway_disagreement(did, svc, prop, val, local_val)
             return
-        if self._apply_property_change(did, svc, prop, val):
-            # Remember it: the next poll may omit the property entirely (the
-            # gateway does not persist live state), and dropping it would flip
-            # the entity back to unknown seconds after it showed the truth.
-            self._overlay().setdefault((str(did), str(svc)), {})[str(prop)] = val
+        canon = self._apply_property_change(did, svc, prop, val)
+        if canon:
+            # Remember it under the CANONICAL service instance name, which is
+            # what `_reapply_overlay` looks up (the tree's `service` field).
+            self._overlay().setdefault((str(did), str(canon)), {})[str(prop)] = val
             # Push the patched device list to entities without waiting for the
             # 60 s poll. No MQTT round-trip, no confirmation semantics.
             self.async_set_updated_data(list(self.data or []))
@@ -582,16 +582,23 @@ class ObloDataCoordinator(DataUpdateCoordinator):
     def _apply_property_change(self, did, svc_name, prop, value):
         """Write one property change into the cached device tree.
 
-        Returns True when something actually changed, so we only notify
-        entities on a real update.
+        Returns the CANONICAL service instance name (`svc["service"]`, e.g.
+        `pir0`) when something actually changed, so the caller can (a) notify
+        entities only on a real update and (b) file its overlay entry under the
+        same key `_reapply_overlay` looks up. Returns False when nothing
+        changed or nothing matched.
 
-        Service identity is matched in two passes. The gateway tree names a
-        service instance `pir0` while an event may name its TYPE `PirService`
-        -- comparing the two strings directly is why motion events were dropped
-        silently. Pass 1 matches the instance name exactly. Pass 2 accepts the
-        type, but only when exactly one service on the device carries it: a
-        device with two outlets would otherwise have the event applied to the
-        wrong relay, and a wrong relay is worse than a dropped event.
+        Returning the canonical name rather than a bare True is the fix for the
+        "ON for one push, then Unknown at the next poll" gap: the event names
+        the TYPE (`PirService`) while the tree and the overlay are keyed by the
+        INSTANCE (`pir0`). Filing the overlay under the raw event name left the
+        memory unreachable by `_reapply_overlay`.
+
+        Service identity is matched in two passes. Pass 1 matches the instance
+        name exactly. Pass 2 accepts the type, but only when exactly one
+        service on the device carries it: a device with two outlets would
+        otherwise have the event applied to the wrong relay, and a wrong relay
+        is worse than a dropped event.
         """
         if did is None or prop is None:
             return False
@@ -621,7 +628,8 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 if str(_prop_value(props, prop)) == str(value):
                     return False
                 _poke_props(props, prop, value)
-                return True
+                # Canonical key: what the tree calls this service instance.
+                return svc.get("service") or svc_name
         return False
 
     async def async_stop_active_alerts(self):
@@ -1149,8 +1157,12 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                             props[k] = local_val
                             applied += 1
                         remembered.pop(name, None)
-                    if not props:
-                        continue
+                    # No `if not props: continue` here. An empty props dict is
+                    # still a service the overlay may have something to say
+                    # about -- skipping it meant a property the gateway omits
+                    # entirely could never be restored on a payload that
+                    # carried no props at all. `if not remembered` below is the
+                    # real gate: no memory, no work.
                     if not remembered:
                         continue
                     # Build case-insensitive map of payload props
