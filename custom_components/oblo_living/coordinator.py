@@ -177,22 +177,55 @@ def _weight(device):
     return (len(services), props)
 
 
+def _real_class(device):
+    """The device's real class string, or "" when the source only sent a marker.
+
+    normalise_ohm_objects() stamps every OHM record with class "ohm" because
+    the live object_list carries no class field. That marker must never be
+    allowed to overwrite a real class that another payload supplied: the class
+    is what APP_CLASS_NAMES keys on, so losing it silently costs every device
+    its marketing name on the device page.
+    """
+    cls = str(device.get("class") or "").strip()
+    if not cls or cls.lower() in ("ohm", "hg"):
+        return ""
+    return cls
+
+
 def merge_devices(*device_lists):
     """De-dup device dicts across payloads, keeping the richest record.
 
     The gateway list and the hg/info list describe the same devices; the
     second usually carries more service props, so the merge must compare
     prop counts -- not just the number of services.
+
+    Richness cannot decide everything: the OHM record wins on props but only
+    ever says class "ohm", while the REST record knows the real class. The
+    winner keeps its services/props, and adopts a real class from any other
+    record for the same id. Without this the app's class->name table can never
+    fire on the live path, and every device silently loses its real name.
     """
     merged = {}
+    classes = {}
     for devices in device_lists:
         for dev in devices or []:
             did = dev.get("id")
             if did is None:
                 continue
-            prev = merged.get(did)
+            # Key on the string form: the REST payload carries numeric ids and
+            # the OHM object_list carries strings, so keying on the raw value
+            # would keep both and hand build_entities every device twice --
+            # two records with the same unique_id, differing only in id type.
+            key = str(did)
+            real = _real_class(dev)
+            if real and key not in classes:
+                classes[key] = real
+            prev = merged.get(key)
             if prev is None or _weight(dev) > _weight(prev):
-                merged[did] = dev
+                merged[key] = dict(dev)
+    for key, dev in merged.items():
+        if not _real_class(dev) and key in classes:
+            dev["class"] = classes[key]
     return list(merged.values())
 
 
