@@ -568,6 +568,11 @@ def ohm_id_from_identifier(entry_id, identifier):
 
     HA's device registry stores the full `device_identifier()` string.
     Diagnostics and other code need the raw OHM object id (numeric string).
+
+    Returns None on mismatch so the caller can log "unrecognised identifier"
+    instead of silently returning live: [] forever. Identifiers are immutable
+    once registered — a mismatch means this device was created with a falsy
+    entry_id and will never heal without manual removal.
     """
     if identifier is None:
         return None
@@ -575,7 +580,7 @@ def ohm_id_from_identifier(entry_id, identifier):
     prefix = f"{entry_id or 'unknown'}_"
     if s.startswith(prefix):
         return s[len(prefix):]
-    return s
+    return None
 
 
 def gateway_identifier(entry_id):

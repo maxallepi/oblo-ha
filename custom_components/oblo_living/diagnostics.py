@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from homeassistant.components.diagnostics import REDACTED
 
-from .entity_map import ohm_id_from_identifier
+from .entity_map import gateway_identifier, ohm_id_from_identifier
 
 # Config entry keys whose existence we report but whose value we never emit.
 # `identity` is the owner's account email and `username` is
@@ -69,6 +69,23 @@ def _api_summary(api):
     return out
 
 
+def _props_names(svc):
+    """Property NAMES of a service, whichever shape the payload used.
+
+    OHM-sourced services carry `props` as a dict; REST-shaped records carry
+    list-of-pairs. Reading only the list shape made every service on the live
+    path report `properties: []` -- the same "empty means no data" ambiguity
+    this release is trying to delete.
+    """
+    props = svc.get("props")
+    if isinstance(props, dict):
+        return sorted(str(k) for k in props)
+    if isinstance(props, list):
+        return [str(p[0]) for p in props
+                if isinstance(p, (list, tuple)) and p]
+    return []
+
+
 def _device_summary(coordinator_data):
     """Per-device overview: id, class, name, model, and service names only.
 
@@ -87,8 +104,7 @@ def _device_summary(coordinator_data):
             "services": [
                 {
                     "service": svc.get("service"),
-                    "properties": [p[0] for p in (svc.get("props") or [])
-                                   if isinstance(p, (list, tuple)) and p],
+                    "properties": _props_names(svc),
                 }
                 for svc in (dev.get("services") or [])
                 if isinstance(svc, dict)
@@ -127,25 +143,56 @@ async def async_get_config_entry_diagnostics(hass, entry):
 
 
 async def async_get_device_diagnostics(hass, entry, device):
-    """Device-level diagnostics: one device's services and property names."""
+    """Device-level diagnostics: one device's services and property names.
+
+    Three device kinds live in this integration's registry, and an empty
+    `live` list must never be the only way to tell them apart:
+
+      gateway  the hub record (`<entry>_gateway`) -- reports the coordinator's
+               gateway summary, not an OHM object
+      device   a child (`<entry>_<ohm_id>`) -- resolves to one OHM object
+      unknown  an identifier this code cannot map. Reported explicitly rather
+               than as `live: []`, because "empty" has been mistaken for
+               "no data" three times in this release.
+    """
     domain_data = (hass.data.get("oblo_living") or {}).get(entry.entry_id) or {}
     coordinator = domain_data.get("coordinator")
-    # The registry stores the entry-scoped identifier ("<entry_id>_1052");
-    # the coordinator's device dicts key on the bare OHM id (1052).
-    raw_id = None
+
+    identifier = None
     for ident in (device.identifiers or set()):
         if isinstance(ident, (tuple, list)) and len(ident) == 2 and ident[0] == "oblo_living":
-            raw_id = ohm_id_from_identifier(entry.entry_id, ident[1])
+            identifier = ident[1]
             break
-    target = None
-    for dev in (getattr(coordinator, "data", None) or []):
-        if not isinstance(dev, dict):
-            continue
-        if str(dev.get("id")) == str(raw_id):
-            target = dev
-            break
-    return {
+
+    raw_id = ohm_id_from_identifier(entry.entry_id, identifier)
+    kind = "unknown"
+    live = []
+    gateway = None
+    if identifier is not None and str(identifier) == gateway_identifier(entry.entry_id):
+        kind = "gateway"
+        gateway = _coordinator_summary(coordinator)
+    elif raw_id is not None:
+        target = None
+        for dev in (getattr(coordinator, "data", None) or []):
+            if not isinstance(dev, dict):
+                continue
+            if str(dev.get("id")) == str(raw_id):
+                target = dev
+                break
+        if target is not None:
+            kind = "device"
+            live = _device_summary([target])
+        else:
+            kind = "device-not-in-last-poll"
+
+    payload = {
         "entry": _entry_summary(entry),
+        "kind": kind,
+        "resolution": {
+            "identifier": identifier,
+            "ohm_id": raw_id,
+            "matched": kind == "device",
+        },
         "device": {
             "id": raw_id,
             "name": getattr(device, "name", None),
@@ -155,5 +202,16 @@ async def async_get_device_diagnostics(hass, entry, device):
             "hw_version": getattr(device, "hw_version", None),
             "via_device_id": getattr(device, "via_device_id", None),
         },
-        "live": _device_summary([target] if target else []),
+        "live": live,
     }
+    if gateway is not None:
+        payload["gateway"] = gateway
+    if kind == "unknown":
+        payload["note"] = ("identifier does not belong to this config entry; "
+                           "registered with a different/falsy entry_id and "
+                           "cannot be re-resolved without removing the device")
+    elif kind == "device-not-in-last-poll":
+        payload["note"] = ("device is known to the registry but absent from the "
+                           "coordinator's last poll -- check `devices` in the "
+                           "entry-level diagnostics")
+    return payload
