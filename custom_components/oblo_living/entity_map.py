@@ -378,7 +378,14 @@ def device_manufacturer(services):
 def device_model(dev_class, service_names):
     """Best hardware description for a device.
 
-    Priority: app class name -> service-derived -> class (if real name) -> fallback.
+    Priority: app class name -> primary service -> auxiliary service ->
+    class (if real name) -> fallback.
+
+    The primary/aux split fixes a payload-order defect: without it, a motion
+    sensor that also reports temperature was labelled "Temperature Sensor"
+    (or "Smart Relay", or "Light Sensor") depending on which service appeared
+    first in the gateway's payload. By ranking services by what DEFINES the
+    device, the label is stable regardless of payload order.
     """
     # 1) OBLO app class->name table (real marketing names)
     if dev_class:
@@ -386,12 +393,48 @@ def device_model(dev_class, service_names):
         if app_name:
             return app_name
 
-    # 2) Service-derived model (existing reliable path)
-    for name in service_names or []:
-        model = MODEL_BY_SERVICE.get(str(name)) or MODEL_BY_SERVICE.get(
-            canonical_service(str(name)))
-        if model:
-            return model
+    # 2) Service-derived model, ranked by primacy (what defines the device)
+    #    Primary = device-class-defining services; Aux = auxiliary channels
+    #    that many device types include but don't define them.
+    names = [str(n) for n in (service_names or [])]
+
+    # Instance aliases that canonical_service() does not know (it maps gateway
+    # backup spellings, not every instance suffix). Kept local to the model
+    # lookup so service addressing elsewhere is untouched.
+    _INSTANCE_ALIASES = {
+        "outlet0": "OutletService", "light0": "LightService",
+        "power0": "PowerConsumptionService", "pir0": "PirService",
+        "temperature0": "TemperatureService", "basic0": "BasicService",
+        "battery0": "BatteryService",
+        "lightIntensity0": "LightIntensityService",
+    }
+
+    def _canon(name):
+        return _INSTANCE_ALIASES.get(name) or canonical_service(name)
+
+    def _first_in(family):
+        for fam in family:
+            for name in names:
+                if name == fam or _canon(name) == fam:
+                    model = MODEL_BY_SERVICE.get(name) or MODEL_BY_SERVICE.get(
+                        _canon(name))
+                    if model:
+                        return model
+        return None
+
+    PRIMARY_SERVICES = [
+        "OutletService", "LightService", "DoorLockService", "SmokeService",
+        "FloodService", "GasService", "PirService", "ContactService",
+        "SimpleAlertService", "WeatherService",
+    ]
+    AUX_SERVICES = [
+        "TemperatureService", "HumidityService", "LightIntensityService",
+        "PowerConsumptionService", "BatteryService", "BasicService",
+    ]
+
+    model = _first_in(PRIMARY_SERVICES) or _first_in(AUX_SERVICES)
+    if model:
+        return model
 
     # 3) Class itself, unless it's a source marker like "ohm" or "hg"
     cls = str(dev_class or "").strip()
