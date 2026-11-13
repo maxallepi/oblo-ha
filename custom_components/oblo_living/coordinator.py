@@ -13,7 +13,8 @@ from homeassistant.helpers.update_coordinator import (
 from .cloud_api import (ObloAuthError, ObloCloudApi, ObloCloudError,
                            ObloRateLimitError, normalise_devices)
 from .cloud_mqtt import ObloCommandError
-from .const import DOMAIN, SCAN_INTERVAL_S
+from .const import (DOMAIN, MAX_SCAN_INTERVAL_S, MIN_SCAN_INTERVAL_S,
+                    SCAN_INTERVAL_S)
 from .entity_map import APP_CLASS_NAMES, canonical_prop
 
 
@@ -311,10 +312,24 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         entry-scoped device identifiers (prevents two gateways from
         colliding on the same OHM object id like "1052").
         """
+        # Clamp on the way in, not just on the options-update path: the
+        # constructor is fed straight from entry.options, and an options dict
+        # written by an older build (or by hand in .storage) can carry 5s.
+        # Three cloud round trips every 5s is how an account gets blocked.
+        _requested = int(scan_interval or SCAN_INTERVAL_S)
+        _interval = max(MIN_SCAN_INTERVAL_S, min(MAX_SCAN_INTERVAL_S, _requested))
+        if _interval != _requested:
+            _LOGGER.warning(
+                "OBLO poll interval %ss is outside %s-%ss; using %ss",
+                _requested, MIN_SCAN_INTERVAL_S, MAX_SCAN_INTERVAL_S, _interval)
         super().__init__(
             hass, _LOGGER, name=f"{DOMAIN}_coordinator",
             update_interval=__import__("datetime").timedelta(
-                seconds=int(scan_interval)))
+                seconds=_interval))
+        # Interval the user asked for. Rate-limit backoff raises update_interval
+        # above this and the next successful poll puts it back, so a temporary
+        # cloud block never silently rewrites the user's setting.
+        self.configured_interval_s = _interval
         self.api = api
         self.devices = []
         self.entry_id = entry_id
@@ -469,7 +484,8 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         hand-edited options dict cannot pin the poller to a hostile rate.
         """
         from datetime import timedelta
-        secs = max(15, int(seconds))
+        secs = max(MIN_SCAN_INTERVAL_S, min(MAX_SCAN_INTERVAL_S, int(seconds)))
+        self.configured_interval_s = secs
         self.update_interval = timedelta(seconds=secs)
         _LOGGER.info("OBLO poll interval set to %ss", secs)
         return secs
@@ -1222,29 +1238,62 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                             remembered[name] = found[1]
         return applied
 
+    # ── rate-limit backoff constants ───────────────────────────────────
+    RATE_LIMIT_BACKOFF_MAX_S = 300  # 5 min cap
+
+    def _rate_limit_backoff(self, err):
+        """Increase poll interval exponentially on consecutive 429s."""
+        from datetime import timedelta
+        cur = int((self.update_interval or timedelta(0)).total_seconds()) \
+              or MIN_SCAN_INTERVAL_S
+        nxt = min(self.RATE_LIMIT_BACKOFF_MAX_S,
+                  max(MIN_SCAN_INTERVAL_S, cur * 2))
+        self._rate_limit_streak = getattr(self, "_rate_limit_streak", 0) + 1
+        self.update_interval = timedelta(seconds=nxt)
+        _LOGGER.warning(
+            "cloud account blocked (%s); backing off to %ss (streak %d), "
+            "keeping cached state", err, nxt, self._rate_limit_streak)
+        return nxt
+
+    def _restore_poll_interval(self):
+        """Restore the user's configured interval after a successful poll."""
+        if getattr(self, "_rate_limit_streak", 0):
+            from datetime import timedelta
+            cfg = getattr(self, "configured_interval_s", MIN_SCAN_INTERVAL_S)
+            self.update_interval = timedelta(seconds=cfg)
+            _LOGGER.info("cloud block cleared; poll interval restored to %ss",
+                         cfg)
+            self._rate_limit_streak = 0
+
     async def _async_update_data(self):
         try:
-            return await self._async_fetch()
+            data = await self._async_fetch()
         except ObloRateLimitError as err:
             # Account temporarily blocked: even correct password fails.
             # Don't re-login (that would hit the same block) and don't retry
-            # immediately -- return cached data and let the scheduled poll
-            # pick it up when the block lifts (~15 min).
-            _LOGGER.warning("cloud account blocked, keeping cached state: %s", err)
+            # immediately -- raise the poll interval so the next scheduled
+            # refresh comes after the block lifts, return cached data.
+            self._rate_limit_backoff(err)
             return self.devices
         except ObloAuthError as err:
             _LOGGER.info("cloud session expired (%s), re-logging in", err)
             try:
-                return await self._async_refresh_relogin()
+                relogin_data = await self._async_refresh_relogin()
             except ObloAuthError as err2:
                 # credentials themselves rejected -> HA shows the reauth form
                 _LOGGER.error("cloud re-login rejected: %s", err2)
                 raise ConfigEntryAuthFailed(str(err2)) from err2
             except ObloRateLimitError as err2:
-                # re-login also hit the block -- don't retry, keep cached
-                _LOGGER.warning("cloud re-login blocked, keeping cached state: %s", err2)
+                # re-login also hit the block -- back off, keep cached
+                self._rate_limit_backoff(err2)
                 return self.devices
             except ObloCloudError as err2:
                 raise UpdateFailed(str(err2)) from err2
+            self._restore_poll_interval()
+            return relogin_data
         except ObloCloudError as err:
             raise UpdateFailed(str(err)) from err
+
+        # Any other path reached here means we have fresh data -> restore.
+        self._restore_poll_interval()
+        return data
