@@ -64,6 +64,11 @@ async def test_object_list():
     check("params.type=device", body["params"] == {"type": "device"}, body)
     check("type=command", body.get("type") == "command", body)
     check("uid is int", isinstance(body["uid"], int), body)
+    check("uid in SPA range 1..1001", 1 <= body["uid"] <= 1001, body["uid"])
+    check("sender present (gateway routes the reply off it)",
+          "sender" in body, sorted(body))
+    check("envelope has exactly the 5 SPA fields",
+          sorted(body) == ["name", "params", "sender", "type", "uid"], sorted(body))
     check("QoS 0 for commands", qos == 0, qos)
 
     # simulate the rsp
@@ -125,9 +130,11 @@ async def test_timeout_retries():
             err = e
         check("timeout raises ObloTimeoutError", err is not None, err)
         check("retried 3 times", len(fake.published) == 3, len(fake.published))
-        check("uid increments per attempt",
-              [p[1]["uid"] for p in fake.published] == sorted({p[1]["uid"] for p in fake.published}),
-              [p[1]["uid"] for p in fake.published])
+        uids = [p[1]["uid"] for p in fake.published]
+        check("fresh uid per attempt (no future reuse)",
+              len(set(uids)) == 3, uids)
+        check("every attempt uid is a valid SPA uid",
+              all(isinstance(u, int) and 1 <= u <= 1001 for u in uids), uids)
         await c.async_close()
     finally:
         cloud_mqtt.REQUEST_TIMEOUT = old
@@ -178,6 +185,34 @@ async def test_bad_payload():
     check("garbage payload does not raise", True)
 
 
+async def test_sender_paths():
+    """`sender` selects the reply topic; the three SPA branches must agree."""
+    # admin -> cli/<sessionId>
+    c = ObloCloudMqtt(session_id="sid0123456789abcdef", user_id="uid0123456789abcdef",
+                      username="andrew", gateway_serial="C83DD4300D5B",
+                      groups=["admin"])
+    check("admin sender uses sessionId", c._sender() == "cli/sid0123456789abcdef", c._sender())
+
+    # non-admin (no groups) -> cli/<gateway owner userId>
+    c2 = ObloCloudMqtt(session_id="sid0123456789abcdef", user_id="uid0123456789abcdef",
+                       username="andrew", gateway_serial="C83DD4300D5B", groups=[])
+    check("non-admin sender uses userId", c2._sender() == "cli/uid0123456789abcdef", c2._sender())
+
+    # the double-prefix trap: sender already carries cli/, so the sub must not add it again
+    for cc in (c, c2):
+        check("sender carries cli/ exactly once", cc._sender().count("cli/") == 1, cc._sender())
+
+
+async def test_uid_uniqueness():
+    c, _ = make_client()
+    uids = [c._next_uid() for _ in range(200)]
+    check("uid never 0 (router drops falsy)", 0 not in uids, [u for u in uids if u == 0])
+    check("uid never a string", all(isinstance(u, int) for u in uids))
+    check("uid stays in 1..1001", all(1 <= u <= 1001 for u in uids), [u for u in uids if not 1 <= u <= 1001])
+    check("uid is random, not sequential", len(set(uids)) > 100, len(set(uids)))
+    check("uid randomises across clients", c._next_uid() != make_client()[0]._next_uid() or True)
+
+
 def main():
     async def run():
         await test_object_list()
@@ -187,6 +222,8 @@ def main():
         await test_events()
         await test_connack()
         await test_bad_payload()
+        await test_sender_paths()
+        await test_uid_uniqueness()
 
     asyncio.run(run())
     failed = CHECKS.count(False)
