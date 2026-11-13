@@ -1,7 +1,7 @@
 {
   "domain": "oblo_living",
   "name": "OBLO Living",
-  "version": "0.2.33",
+  "version": "0.2.34",
   "documentation": "https://github.com/maxallepi/oblo-ha",
   "codeowners": [
     "@MrMuscles007"
