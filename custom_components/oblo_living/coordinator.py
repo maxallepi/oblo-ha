@@ -621,6 +621,36 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                     len(self.devices),
                     sum(len(d.get("services", [])) for d in self.devices),
                     len(svc_names), len(entities), sorted(svc_names)[:30])
+
+                # Property NAMES (never values) for every service that has a
+                # writable entity behind it. Answers, once per install and
+                # without waiting for a live event, whether the poll payload
+                # actually carries the property each entity reads:
+                #   outlet0.State            -> is the relay overlay needed at
+                #                               all, or is the poll sufficient?
+                #   SimpleAlertService.*     -> can the alert entities ever
+                #                               show a state before an evt?
+                #   everything else outlet0  -> is DeviceType=16 the only decoy
+                #                               in that service, or one of many?
+                interesting = ("outlet", "OutletService", "SimpleAlertService",
+                               "PowerConsumptionService")
+                diag_props = {}
+                for d in self.devices:
+                    for s in d.get("services", []):
+                        name = str(s.get("service") or "")
+                        stype = str(s.get("service_type") or "")
+                        if not any(m in name or m in stype for m in interesting):
+                            continue
+                        props = s.get("props")
+                        if isinstance(props, dict):
+                            names = sorted(str(k) for k in props)
+                        elif isinstance(props, list):
+                            names = sorted(str(p[0]) for p in props
+                                           if isinstance(p, (list, tuple)) and p)
+                        else:
+                            names = []
+                        diag_props[f"{d.get('id')}/{name}"] = names
+                _LOGGER.warning("DIAG writable props: %s", diag_props)
             except Exception as e:  # never let diagnostics break the poll
                 _LOGGER.warning("DIAG summary failed: %s", e)
 
