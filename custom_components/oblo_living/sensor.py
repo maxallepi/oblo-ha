@@ -6,22 +6,15 @@ HA imports this module by name because PLATFORMS in __init__.py lists
 import logging
 
 from .const import DOMAIN
+from .dynamic import async_setup_dynamic_platform
 from .entities.sensor import ObloSensor
-from .entity_map import build_entities
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    """Build sensor entities from the devices the coordinator already fetched."""
-    data = hass.data[DOMAIN][entry.entry_id]
-    coordinator = data["coordinator"]
-
-    entities = []
-    for ent in build_entities(coordinator.data or []):
-        if ent["platform"] != "sensor":
-            continue
-        entities.append(ObloSensor(coordinator, ent))
-
-    _LOGGER.debug("OBLO sensor platform: %d entities", len(entities))
-    async_add_entities(entities)
+    """Build sensors now and add any that appear on later refreshes."""
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    return async_setup_dynamic_platform(
+        hass, entry, async_add_entities, "sensor",
+        lambda ent: ObloSensor(coordinator, ent))

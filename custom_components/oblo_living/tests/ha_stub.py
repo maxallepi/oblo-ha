@@ -31,6 +31,28 @@ def install():
 
     ce.ConfigFlow = ConfigFlow
 
+    class OptionsFlow:
+        """Mirrors HA's OptionsFlow: HA injects config_entry, the step returns
+        a form dict or an entry dict. Enough to exercise the real schema."""
+
+        config_entry = None
+
+        def async_create_entry(self, title="", data=None):
+            self.created = {"title": title, "data": data}
+            return self.created
+
+        def async_show_form(self, step_id, data_schema=None, errors=None,
+                            description_placeholders=None):
+            self.shown = {
+                "step_id": step_id,
+                "schema": data_schema,
+                "errors": errors,
+                "placeholders": description_placeholders,
+            }
+            return self.shown
+
+    ce.OptionsFlow = OptionsFlow
+
     exc = _mod("homeassistant.exceptions")
 
     class ConfigEntryAuthFailed(Exception):

@@ -92,5 +92,16 @@
         }
       }
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "OBLO Living options",
+        "description": "How often Home Assistant polls the OBLO cloud. Default {default} s, minimum {min} s. Live device changes arrive through the gateway event stream within milliseconds, so the poll only exists to catch missed events - a longer interval is gentler on the cloud API (each poll is three cloud round-trips).",
+        "data": {
+          "scan_interval": "Poll interval (seconds)"
+        }
+      }
+    }
   }
 }

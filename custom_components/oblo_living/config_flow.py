@@ -10,6 +10,8 @@ from .const import (
     DOMAIN, CONF_IDENTITY, CONF_SECRET,
     CONF_SESSION_ID, CONF_USER_ID,
     CONF_USERNAME, CONF_GROUPS,
+    CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S,
+    MIN_SCAN_INTERVAL_S, MAX_SCAN_INTERVAL_S,
 )
 from .cloud_api import (
     ObloCloudApi, ObloAuthError, ObloCloudError, ObloRateLimitError,
@@ -31,6 +33,11 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def __init__(self):
         self._entry = None
+
+    @staticmethod
+    def async_get_options_flow(config_entry):
+        """Hand HA the options flow (Configure button on the integration card)."""
+        return ObloOptionsFlow()
 
     # ---------------------------------------------------------------- helpers
     async def _async_login(self, identity: str, secret: str):
@@ -148,6 +155,43 @@ class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({vol.Required(CONF_SECRET): str}),
             errors=errors,
             description_placeholders={"identity": identity},
+        )
+
+
+class ObloOptionsFlow(config_entries.OptionsFlow):
+    """Options: how often to poll the cloud.
+
+    The poll is a safety net, not the update path -- gateway events patch the
+    cache in milliseconds (v0.2.32). But each poll costs three round trips
+    (list_gateways + gateway_devices REST, then an OHM object_list command),
+    and this cloud already rate-limited us once with 000016/HTTP 429. So the
+    floor is 15 s, not 5 s: 5 s would be ~2,160 requests/hour against an
+    undocumented endpoint.
+    """
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None):
+        if user_input is not None:
+            # HA validates the Range below, so this is already sane; clamp
+            # anyway in case a stored options dict was hand-edited.
+            secs = int(user_input[CONF_SCAN_INTERVAL])
+            secs = max(MIN_SCAN_INTERVAL_S, min(MAX_SCAN_INTERVAL_S, secs))
+            return self.async_create_entry(
+                title="", data={CONF_SCAN_INTERVAL: secs})
+
+        current = self.config_entry.options.get(
+            CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema({
+                vol.Required(CONF_SCAN_INTERVAL, default=current): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=MIN_SCAN_INTERVAL_S, max=MAX_SCAN_INTERVAL_S),
+                ),
+            }),
+            description_placeholders={
+                "default": str(DEFAULT_SCAN_INTERVAL_S),
+                "min": str(MIN_SCAN_INTERVAL_S),
+            },
         )
 
 

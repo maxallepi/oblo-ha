@@ -12,22 +12,15 @@ switch at all, so an unconfirmed write raises instead of flipping the UI.
 import logging
 
 from .const import DOMAIN
+from .dynamic import async_setup_dynamic_platform
 from .entities.switch import ObloSwitch
-from .entity_map import build_entities
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    """Build switch entities from the devices the coordinator already fetched."""
-    data = hass.data[DOMAIN][entry.entry_id]
-    coordinator = data["coordinator"]
-
-    entities = []
-    for ent in build_entities(coordinator.data or []):
-        if ent["platform"] != "switch":
-            continue
-        entities.append(ObloSwitch(coordinator, ent))
-
-    _LOGGER.debug("OBLO switch platform: %d entities (writable)", len(entities))
-    async_add_entities(entities)
+    """Build switches now and add any writable service that appears later."""
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    return async_setup_dynamic_platform(
+        hass, entry, async_add_entities, "switch",
+        lambda ent: ObloSwitch(coordinator, ent))

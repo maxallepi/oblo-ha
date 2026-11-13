@@ -11,7 +11,11 @@ CONF_SESSION_ID = "session_id"  # cached, refreshed at setup
 CONF_USER_ID = "user_id"
 CONF_USERNAME = "username"      # cli/<username> for cloud MQTT
 CONF_GROUPS = "groups"          # ["admin"] -> admin OHM path
-SCAN_INTERVAL_S = 60
+CONF_SCAN_INTERVAL = "scan_interval"
+DEFAULT_SCAN_INTERVAL_S = 60
+MIN_SCAN_INTERVAL_S = 15
+MAX_SCAN_INTERVAL_S = 3600
+SCAN_INTERVAL_S = 60  # backwards-compat constant for existing imports
 
 # -- control path -----------------------------------------------------------
 # Values sent as set_service_property_value(property_value=...). The gateway

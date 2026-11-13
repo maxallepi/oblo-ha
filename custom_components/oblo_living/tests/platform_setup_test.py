@@ -35,10 +35,31 @@ class FakeCoordinator:
     def __init__(self, devices):
         self.data = devices
         self.devices = devices
+        self._listeners = []
+
+    # Real DataUpdateCoordinator keeps listeners and calls them after every
+    # successful refresh; dynamic entity discovery relies on exactly that.
+    def async_add_listener(self, cb):
+        self._listeners.append(cb)
+
+        def _remove():
+            if cb in self._listeners:
+                self._listeners.remove(cb)
+        return _remove
+
+    def fire_refresh(self):
+        for cb in list(self._listeners):
+            cb()
 
 
 class FakeEntry:
     entry_id = "test_entry"
+
+    def __init__(self):
+        self.unload_callbacks = []
+
+    def async_on_unload(self, fn):
+        self.unload_callbacks.append(fn)
 
 
 class FakeHass:

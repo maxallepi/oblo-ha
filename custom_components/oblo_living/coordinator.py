@@ -199,10 +199,19 @@ def merge_devices(*device_lists):
 class ObloDataCoordinator(DataUpdateCoordinator):
     """Polls the cloud for gateway + device state, re-authenticating on expiry."""
 
-    def __init__(self, hass: HomeAssistant, api: ObloCloudApi):
+    def __init__(self, hass: HomeAssistant, api: ObloCloudApi,
+                 scan_interval: int = SCAN_INTERVAL_S):
+        """scan_interval is the poll period in seconds (options flow, min 15).
+
+        The poll is a safety net: gateway events patch the cache as they
+        arrive. Each poll is three round trips against a cloud API that has
+        already rate-limited this account once, so the caller passes the
+        configured interval rather than a hard constant.
+        """
         super().__init__(
             hass, _LOGGER, name=f"{DOMAIN}_coordinator",
-            update_interval=__import__("datetime").timedelta(seconds=SCAN_INTERVAL_S))
+            update_interval=__import__("datetime").timedelta(
+                seconds=int(scan_interval)))
         self.api = api
         self.devices = []
         # Optional cloud MQTT/OHM client. REST only returns the gateway object;
@@ -222,6 +231,20 @@ class ObloDataCoordinator(DataUpdateCoordinator):
     def set_ohm_client(self, client):
         """Attach the cloud MQTT/OHM client (or None to disable)."""
         self.ohm = client
+
+    def set_scan_interval(self, seconds):
+        """Change the poll period in place (options flow, no reload needed).
+
+        DataUpdateCoordinator re-schedules its next refresh when
+        update_interval is assigned, so writing this attribute is the whole
+        mechanism. Clamped to the same bounds the options schema enforces so a
+        hand-edited options dict cannot pin the poller to a hostile rate.
+        """
+        from datetime import timedelta
+        secs = max(15, int(seconds))
+        self.update_interval = timedelta(seconds=secs)
+        _LOGGER.info("OBLO poll interval set to %ss", secs)
+        return secs
 
     # ── in-flight actuation bookkeeping ─────────────────────────────────
     # A sound-alert press writes "true", sleeps, then writes "false". If HA

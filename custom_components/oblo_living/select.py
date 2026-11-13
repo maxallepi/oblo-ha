@@ -9,22 +9,15 @@ Only services listed in MULTI_ENTITY_MAP with platform "select" appear here
 import logging
 
 from .const import DOMAIN
+from .dynamic import async_setup_dynamic_platform
 from .entities.select import ObloAlertTypeSelect
-from .entity_map import build_entities
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    """Build select entities from the devices the coordinator already fetched."""
-    data = hass.data[DOMAIN][entry.entry_id]
-    coordinator = data["coordinator"]
-
-    entities = []
-    for ent in build_entities(coordinator.data or []):
-        if ent["platform"] != "select":
-            continue
-        entities.append(ObloAlertTypeSelect(coordinator, ent))
-
-    _LOGGER.debug("OBLO select platform: %d entities", len(entities))
-    async_add_entities(entities)
+    """Build selects now and add any that appear on later refreshes."""
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    return async_setup_dynamic_platform(
+        hass, entry, async_add_entities, "select",
+        lambda ent: ObloAlertTypeSelect(coordinator, ent))

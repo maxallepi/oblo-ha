@@ -5,7 +5,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN, CONF_IDENTITY, CONF_SECRET, CONF_SESSION_ID, CONF_USER_ID, CONF_USERNAME, CONF_GROUPS, SCAN_INTERVAL_S
+from .const import (DOMAIN, CONF_IDENTITY, CONF_SECRET, CONF_SESSION_ID,
+                    CONF_USER_ID, CONF_USERNAME, CONF_GROUPS,
+                    CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S,
+                    SCAN_INTERVAL_S)
 from .cloud_api import ObloCloudApi, ObloCloudError
 from .cloud_mqtt import ObloCloudMqtt
 from .coordinator import ObloDataCoordinator
@@ -106,7 +109,9 @@ async def _async_start_ohm(hass, api, coordinator):
             _LOGGER.info("OHM evt subscribed (live property changes will log)")
         else:
             _LOGGER.warning("OHM evt not subscribed -- state updates will "
-                            "only arrive on the %ss poll", SCAN_INTERVAL_S)
+                            "only arrive on the %ss poll",
+                            int(coordinator.update_interval.total_seconds())
+                            if coordinator.update_interval else SCAN_INTERVAL_S)
         await coordinator.async_request_refresh()
         _LOGGER.info("OHM connected: devices=%d", len(coordinator.devices))
         return client
@@ -139,8 +144,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         api.username = entry.data.get(CONF_USERNAME)
         api.groups = entry.data.get(CONF_GROUPS) or []
 
-    # coordinator for periodic polling (re-login + fetch happens inside)
-    coordinator = ObloDataCoordinator(hass, api)
+    # coordinator for periodic polling (re-login + fetch happens inside).
+    # Interval comes from the options flow (default 60 s, floor 15 s): the poll
+    # is a safety net for missed gateway events, but each cycle is three cloud
+    # round trips and this API has already rate-limited the account once.
+    scan_interval = entry.options.get(
+        CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S)
+    coordinator = ObloDataCoordinator(hass, api, scan_interval=scan_interval)
     await coordinator.async_config_entry_first_refresh()
     _LOGGER.info("cloud session=%s devices=%d", api.session_id, len(coordinator.devices))
 
@@ -178,9 +188,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "ohm": ohm,
     }
 
+    # Options changed (poll interval) -> apply in place, no reload.
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await async_register_services(hass)
     return True
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry):
+    """Apply option changes in place (registered as an entry update listener).
+
+    Kept at module level, not nested, so it can be driven by a test without a
+    full HA runtime. HA calls this after the options flow writes the entry, so
+    a new poll interval takes effect without a reload: assigning
+    coordinator.update_interval reschedules the next refresh, and no entity is
+    rebuilt -- an in-flight write or a sounding siren is not disturbed.
+    """
+    data = hass.data.get(DOMAIN, {}).get(entry.entry_id) or {}
+    coord = data.get("coordinator")
+    if coord is None:
+        return
+    coord.set_scan_interval(
+        entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S))
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
