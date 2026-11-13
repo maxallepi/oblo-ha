@@ -38,6 +38,7 @@ import logging
 import aiohttp
 
 from .const import CLOUD_HOST
+from .entity_map import canonical_prop
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -289,6 +290,11 @@ def normalise_devices(gateways):
                 props = svc.get("props") or svc.get("properties") or []
                 if isinstance(props, dict):
                     props = list(props.items())
+                # REST payloads use the same wire spellings as OHM
+                # ("PlugState"), so normalise here too -- otherwise a value
+                # from this path lands under a key the entity never reads.
+                props = [[canonical_prop(p[0]), p[1]] if isinstance(p, (list, tuple))
+                         and len(p) >= 2 else p for p in props]
                 services.append({"service": name, "props": list(props)})
         out.append({
             "id": did,

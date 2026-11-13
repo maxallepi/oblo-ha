@@ -214,7 +214,15 @@ def normalise_ohm_objects(ohm_objects):
                 pname = prop.get("name")
                 pval = prop.get("value")
                 if pname:
-                    props[pname] = pval
+                    # Same canonicalisation the evt path applies (v0.2.46).
+                    # OHM delivers wire spelling ("PlugState", "PirState"),
+                    # our entity map reads "State"; without this the poll path
+                    # wrote a key nobody reads and every binary sensor on a
+                    # polled device stayed Unknown forever.
+                    # A payload carrying both "State" and "PirState" collapses
+                    # to one key and the later entry wins -- no observed case,
+                    # and one honest value beats two that disagree.
+                    props[canonical_prop(pname)] = pval
             # Preserve the canonical type from OHM (category or type) so that
             # the write path can address a service by type as well as by alias.
             # Does not affect entity output; tests assert entity count unchanged.
@@ -813,6 +821,13 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         read-back of a confirmed write, which is why it is safe to remember in
         the overlay exactly like a live evt: both are the gateway speaking.
         """
+        # Gateway ACKs may echo the wire spelling ("ReedSwitchState") even
+        # though the write was sent as "State". Canonicalise once so both the
+        # props dict and the overlay use the same key the entity reads.
+        property_name = canonical_prop(property_name)
+        if property_name is None:
+            return False
+
         for dev in self.devices or []:
             if dev.get("id") != device_id:
                 continue
