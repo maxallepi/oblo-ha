@@ -128,7 +128,7 @@ async def _async_start_ohm(hass, api, coordinator):
     return None
 
 
-def _async_register_gateway_device(hass, entry, serial):
+def _async_register_gateway_device(hass, entry, coordinator):
     """Create/update the gateway's own device record.
 
     Entities declare `via_device` pointing at this record so the device page
@@ -141,14 +141,20 @@ def _async_register_gateway_device(hass, entry, serial):
         from homeassistant.helpers import device_registry as dr
 
         registry = dr.async_get(hass)
-        name = f"OBLO Gateway {serial}" if serial else "OBLO Gateway"
+        serial = coordinator.gateway_serial
+        # Explicit parens: `a or b if c else d` parses as `(a or b) if c else d`,
+        # which would drop the gateway name whenever the serial is missing.
+        name = (coordinator.gateway_name
+                or (f"OBLO Gateway {serial}" if serial else "OBLO Gateway"))
         return registry.async_get_or_create(
             config_entry_id=entry.entry_id,
             identifiers={(DOMAIN, gateway_identifier(entry.entry_id))},
             manufacturer=MANUFACTURER,
-            model="OBLO Living Gateway",
+            model=coordinator.gateway_model or "OBLO Living Gateway",
             name=name,
             serial_number=serial or None,
+            sw_version=coordinator.gateway_sw_version,
+            hw_version=coordinator.gateway_hw_version,
         )
     except Exception as err:  # noqa: BLE001 - never fail setup
         _LOGGER.debug("gateway device not registered: %s", err)
@@ -185,7 +191,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Gateway device for via_device (entities point at it so the device page
     # groups them under "Connected via OBLO Gateway ...")
-    _async_register_gateway_device(hass, entry, coordinator.gateway_serial)
+    _async_register_gateway_device(hass, entry, coordinator)
 
     # persist what we learned so a restart does not need a fresh login
     # (OHM needs username+groups; a cached session alone does not carry them)

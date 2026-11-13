@@ -221,6 +221,12 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         self.devices = []
         self.entry_id = entry_id
         self.gateway_serial = None
+        # Gateway device-page metadata, filled from the gateway object in the
+        # poll. None until the first successful poll.
+        self.gateway_name = None
+        self.gateway_model = None
+        self.gateway_sw_version = None
+        self.gateway_hw_version = None
         # Optional cloud MQTT/OHM client. REST only returns the gateway object;
         # the device inventory with service_list lives behind OHM commands, so
         # when a client is attached its object_list is merged in and wins on
@@ -567,6 +573,23 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                       or gw.get("sn") or gw.get("deviceSN"))
                 if sn and not self.gateway_serial:
                     self.gateway_serial = str(sn)
+                # Gateway hardware metadata for the gateway device record. All
+                # optional: a missing field must not break the poll, so each is
+                # read tolerantly and only stored when it is a plain string.
+                for attr, keys in (
+                    ("gateway_name", ("deviceName", "name")),
+                    ("gateway_model", ("model", "modelNumber", "deviceModel")),
+                    ("gateway_sw_version", ("swVersion", "firmwareVersion",
+                                            "softwareVersion", "version")),
+                    ("gateway_hw_version", ("hwVersion", "hardwareVersion")),
+                ):
+                    if getattr(self, attr, None):
+                        continue
+                    for key in keys:
+                        val = gw.get(key)
+                        if isinstance(val, (str, int, float)) and str(val).strip():
+                            setattr(self, attr, str(val).strip())
+                            break
                 _LOGGER.debug(
                     "UPLINK sn=%s connectionStatus=%s lastTimeOnline=%s "
                     "lastTimeStatusUpdated=%s (transition timestamp, not a heartbeat)",

@@ -331,22 +331,73 @@ MODEL_BY_SERVICE = {
 }
 
 
-def device_model(service_names, dev_class=None):
-    """Best hardware description for a device from the services it exposes.
+# Z-Wave manufacturer IDs -> vendor name. Only vendors actually observed in
+# OBLO payloads plus the common ones; unknown IDs fall back to OBLO Living.
+# Format: decimal or hex integer key -> string.
+# Andrew's Hallway Lights (id 1052) has ManufacturerSpecific.ManufacturerID=345 (0x0159) = Qubino.
+ZWAVE_VENDORS = {
+    345: "Qubino",          # 0x0159 - Flush 1 relay family (verified)
+    134: "Aeotec",          # 0x0086
+    271: "Fibaro",          # 0x010F
+    96: "Everspring",       # 0x0060
+}
 
-    Service order matters: the first service with a known model wins, so a
-    device that is mostly a relay is described as a relay even if it also has
-    a metering service.
+
+# OBLO app class->name table (verbatim marketing names from app.js).
+# Hand-curated subset covering Andrew's devices + obvious ones.
+# Unknown class falls back to service-derived model -> class -> "OBLO Device".
+APP_CLASS_NAMES = {
+    "Qubino On/Off Relay": "On/Off Relay",
+    "SimpleAlert": "Internal Siren",
+    "Everspring Door Window Mini": "Door/Window Detector MINI",
+    "Qubino Flush 1D Relay": "Flush 1D Relay",
+    "Qubino Flush 2 Relay": "Flush 2 Relay",
+    "Fibaro Wall Plug": "Wall Plug",
+    "Aeotec Smart Switch 6": "Smart Switch 6",
+}
+
+
+def device_manufacturer(services):
+    """Z-Wave vendor from ManufacturerSpecific.ManufacturerID, else OBLO Living."""
+    for svc in services or []:
+        name = str(svc.get("service") or svc.get("name") or "")
+        if canonical_service(name) != "ManufacturerSpecific":
+            continue
+        raw = read_prop_strict(svc, "ManufacturerID")
+        if raw is None:
+            continue
+        try:
+            # Accept decimal "345" or hex "0x0159"
+            mfr_id = int(raw, 0)
+            return ZWAVE_VENDORS.get(mfr_id, MANUFACTURER)
+        except ValueError:
+            continue
+    return MANUFACTURER
+
+
+def device_model(dev_class, service_names):
+    """Best hardware description for a device.
+
+    Priority: app class name -> service-derived -> class (if real name) -> fallback.
     """
-    for name in service_names:
+    # 1) OBLO app class->name table (real marketing names)
+    if dev_class:
+        app_name = APP_CLASS_NAMES.get(str(dev_class))
+        if app_name:
+            return app_name
+
+    # 2) Service-derived model (existing reliable path)
+    for name in service_names or []:
         model = MODEL_BY_SERVICE.get(str(name)) or MODEL_BY_SERVICE.get(
             canonical_service(str(name)))
         if model:
             return model
-    # Fall back to a real class string; never surface the "ohm" source marker.
+
+    # 3) Class itself, unless it's a source marker like "ohm" or "hg"
     cls = str(dev_class or "").strip()
-    if cls and cls.lower() != "ohm":
+    if cls and cls.lower() not in ("ohm", "hg", "sensor", "pir", "relay"):
         return cls
+
     return "OBLO Device"
 
 
@@ -377,7 +428,8 @@ def device_info_fields(ent, entry_id=None, gateway_serial=None):
     fields = {
         "identifiers": {(DOMAIN, device_identifier(entry_id, did))},
         "name": (ent.get("name") or str(did) or "OBLO").strip(),
-        "manufacturer": MANUFACTURER,
+        # Z-Wave vendor when the device reports ManufacturerSpecific, else OBLO.
+        "manufacturer": ent.get("manufacturer") or MANUFACTURER,
         "model": ent.get("model") or "OBLO Device",
     }
     serial = str(ent.get("gateway") or gateway_serial or "").strip()
@@ -419,8 +471,10 @@ def build_entities(devices):
         present_canon = {canonical_service(n) for n in present}
         is_relay = "relay" in (dev.get("class") or "").lower()
         # Device-page metadata, computed once per device: every entity of this
-        # device must carry the same model or HA shows a split device record.
-        model = device_model([s["service"] for s in raw], dev.get("class"))
+        # device must carry the same model/manufacturer or HA shows a split
+        # device record.
+        model = device_model(dev.get("class"), [s["service"] for s in raw])
+        manufacturer = device_manufacturer(raw)
         seen = set()
         # canonical spellings win over gateway-backup aliases on the same device
         for svc in sorted(raw, key=lambda s: canonical_service(s["service"]) != s["service"]):
@@ -454,6 +508,7 @@ def build_entities(devices):
                         "unique_id": (f"oblo_{dev['id']}_{name}_"
                                       f"{spec['platform']}_{spec.get('suffix')}"),
                         "model": model,
+                        "manufacturer": manufacturer,
                     })
                 continue
             if name not in SERVICE_MAP:
@@ -492,5 +547,6 @@ def build_entities(devices):
                 "service_type": svc.get("service_type"),
                 "unique_id": f"oblo_{dev['id']}_{name}",
                 "model": model,
+                "manufacturer": manufacturer,
             })
     return out

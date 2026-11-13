@@ -171,7 +171,8 @@ for e in alert_ents:
     alert_ids.add(frozenset(di.identifiers))
     check(f"{e['name_suffix']} identifiers", di.identifiers == {(DOMAIN, device_identifier("test_entry", "15"))})
     check(f"{e['name_suffix']} name", di.name == "Gateway Simple Alert")
-    check(f"{e['name_suffix']} model", di.model == "Alert Siren")
+    # class "SimpleAlert" resolves through the app class->name table
+    check(f"{e['name_suffix']} model", di.model == "Internal Siren")
 
 check("all 3 share same identifiers", len(alert_ids) == 1)
 
@@ -217,7 +218,16 @@ class FakeHass:
     data = {}
 
 
-rec = _async_register_gateway_device(FakeHass(), FakeEntry(), "GW999")
+class FakeCoord:
+    """Minimal coordinator shape used by the gateway registration."""
+    gateway_serial = "GW999"
+    gateway_name = None
+    gateway_model = None
+    gateway_sw_version = None
+    gateway_hw_version = None
+
+
+rec = _async_register_gateway_device(FakeHass(), FakeEntry(), FakeCoord())
 created = dr_mod._REGISTRY.created
 
 check("registry received one device", len(created) == 1)
@@ -232,9 +242,36 @@ if created:
 
 check("registration returns the record", rec is not None)
 
+# gateway metadata from the cloud object wins over the generated name
+dr_mod._REGISTRY.created.clear()
+
+
+class RichCoord(FakeCoord):
+    gateway_name = "Living Room"
+    gateway_model = "DOC300"
+    gateway_sw_version = "5.4.0"
+    gateway_hw_version = "5.4.0"
+
+
+rec_rich = _async_register_gateway_device(FakeHass(), FakeEntry(), RichCoord())
+if dr_mod._REGISTRY.created:
+    kwr = dr_mod._REGISTRY.created[0]
+    check("gateway name from cloud", kwr.get("name") == "Living Room")
+    check("gateway model from cloud", kwr.get("model") == "DOC300")
+    check("gateway sw_version", kwr.get("sw_version") == "5.4.0")
+    check("gateway hw_version", kwr.get("hw_version") == "5.4.0")
+    check("gateway serial still set", kwr.get("serial_number") == "GW999")
+check("rich registration returns the record", rec_rich is not None)
+
 # no serial -> still registers, name has no trailing space, serial_number None
 dr_mod._REGISTRY.created.clear()
-rec2 = _async_register_gateway_device(FakeHass(), FakeEntry(), None)
+
+
+class NoSerialCoord(FakeCoord):
+    gateway_serial = None
+
+
+rec2 = _async_register_gateway_device(FakeHass(), FakeEntry(), NoSerialCoord())
 check("registers without serial", len(dr_mod._REGISTRY.created) == 1)
 if dr_mod._REGISTRY.created:
     kw2 = dr_mod._REGISTRY.created[0]
@@ -251,22 +288,99 @@ import homeassistant.helpers.device_registry as _drm  # noqa: E402
 _saved = _drm.async_get
 _drm.async_get = lambda hass: BoomRegistry()
 try:
-    rec3 = _async_register_gateway_device(FakeHass(), FakeEntry(), "GW1")
+    rec3 = _async_register_gateway_device(FakeHass(), FakeEntry(), FakeCoord())
     check("registry failure swallowed", rec3 is None)
 finally:
     _drm.async_get = _saved
 
-# setup calls it (static wiring check: the call site passes the serial)
+# setup calls it (static wiring check: the call site passes the coordinator)
 import inspect  # noqa: E402
 src = inspect.getsource(__import__(
     "custom_components.oblo_living", fromlist=["x"]).async_setup_entry)
 check("setup registers the gateway device",
       "_async_register_gateway_device(hass, entry" in src)
-check("setup passes the coordinator serial",
-      "coordinator.gateway_serial" in src)
+check("setup passes the coordinator (holds serial + metadata)",
+      "_async_register_gateway_device(hass, entry, coordinator)" in src)
 check("setup calls it after the first refresh",
       src.index("async_config_entry_first_refresh")
       < src.index("_async_register_gateway_device(hass, entry"))
+
+
+# ----- model / manufacturer resolution (app class table + Z-Wave vendor) -----
+
+print("\n--- model & manufacturer resolution ---")
+from custom_components.oblo_living.entity_map import (  # noqa: E402
+    APP_CLASS_NAMES, ZWAVE_VENDORS, device_manufacturer, device_model,
+)
+
+# app class->name table wins over the service fallback
+check("app class name wins",
+      device_model("Qubino On/Off Relay", ["outlet0"]) == "On/Off Relay")
+check("SimpleAlert -> Internal Siren",
+      device_model("SimpleAlert", ["SimpleAlertService"]) == "Internal Siren")
+# unknown class falls back to the service-derived model
+check("unknown class -> service model",
+      device_model("SomeUnknownClass", ["outlet0"]) == "Smart Relay")
+# unknown class with unknown services -> class itself (still a real string)
+check("unknown class, unknown services -> class",
+      device_model("Acme Widget", []) == "Acme Widget")
+# source marker never surfaces as a model
+check("ohm class never surfaces",
+      device_model("ohm", []) == "OBLO Device")
+check("hg class never surfaces",
+      device_model("hg", []) == "OBLO Device")
+check("no class no services -> OBLO Device",
+      device_model(None, []) == "OBLO Device")
+
+# Qubino relay: mfr id 345 from ManufacturerSpecific, decimal and hex forms
+qub_services = [
+    {"service": "ManufacturerSpecific",
+     "props": [("ManufacturerID", "345"), ("ProductTypeID", "2"),
+               ("ProductID", "82")]},
+    {"service": "ZWaveService", "props": [("NodeID", "14")]},
+    {"service": "outlet0", "props": [("State", "false")]},
+]
+check("Qubino manufacturer from mfr id",
+      device_manufacturer(qub_services) == "Qubino")
+check("hex mfr id also resolves",
+      device_manufacturer([{"service": "ManufacturerSpecific",
+                            "props": [("ManufacturerID", "0x0159")]}]) == "Qubino")
+# no ManufacturerSpecific -> OBLO
+check("no ManufacturerSpecific -> OBLO",
+      device_manufacturer([{"service": "outlet0", "props": []}]) == MANUFACTURER)
+check("garbage mfr id -> OBLO",
+      device_manufacturer([{"service": "ManufacturerSpecific",
+                            "props": [("ManufacturerID", "not-an-int")]}])
+      == MANUFACTURER)
+# siren (device 15) has zero properties -> still OBLO Living
+check("siren has no vendor -> OBLO",
+      device_manufacturer([{"service": "SimpleAlertService", "props": []},
+                           {"service": "OperationalService", "props": []}])
+      == MANUFACTURER)
+
+# end-to-end through build_entities: entity dicts carry both fields
+qdev = {
+    "id": "1052", "name": "Hallway Lights", "class": "Qubino On/Off Relay",
+    "services": qub_services,
+}
+qents = build_entities([qdev])
+check("entity carries Qubino manufacturer",
+      all(e.get("manufacturer") == "Qubino" for e in qents) and qents)
+check("entity carries app class model",
+      all(e.get("model") == "On/Off Relay" for e in qents) and qents)
+qsw = [e for e in qents if e["platform"] == "switch"]
+check("Qubino relay yields a switch entity", len(qsw) == 1)
+if qsw:
+    di_q = ObloSwitch(make_coordinator(), qsw[0])._attr_device_info
+    check("device_info manufacturer is Qubino", di_q.manufacturer == "Qubino")
+    check("device_info model is On/Off Relay", di_q.model == "On/Off Relay")
+
+# siren device 15 keeps OBLO Living as manufacturer
+sents = build_entities([alert_dev])
+check("siren entity manufacturer OBLO",
+      all(e.get("manufacturer") == MANUFACTURER for e in sents) and sents)
+check("siren model from app class table",
+      all(e.get("model") == "Internal Siren" for e in sents) and sents)
 
 
 # ----- summary --------------------------------------------------------------
