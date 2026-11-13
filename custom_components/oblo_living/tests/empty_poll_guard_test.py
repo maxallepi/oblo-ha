@@ -72,6 +72,11 @@ class FakeOhm:
         return self.objects
 
 
+# Andrew's exact poll shape: both endpoints return the gateway record
+# (no `devices` key inside it).
+GATEWAY_ONLY = {"id": "gw1", "type": "hg", "device_count": 0, "has_devices": False}
+
+
 GOOD_DEVICE = {
     "id": "1052",
     "device_name": "Hallway Lights",
@@ -139,6 +144,32 @@ async def main():
     held = await coord3._async_fetch()
     check("indistinguishable empty house -> cache held (deliberate)",
           len(held) >= 1, f"got {len(held)}")
+
+    # --- Andrew's exact shape: gateways + details return the gateway record ---
+    # /hg/info returns the same gateway object (no device list) on this firmware.
+    # diag_shape() reads .get("devices") -> missing -> has_devices=False, device_count=0
+    # This is diagnostic noise, NOT a functional signal. The cache must still hold.
+    coord4 = ObloDataCoordinator(None, FakeApi([GOOD_DEVICE]),  # type: ignore[arg-type]
+                        entry_id="e" * 32)
+    coord4.set_ohm_client(FakeOhm([GOOD_DEVICE]))
+    await coord4._async_fetch()
+    # Now the poll returns gateway-only on both endpoints + OHM empty
+    coord4.set_ohm_client(FakeOhm([]))
+    coord4.api = FakeApi([], gateways=[GATEWAY_ONLY])  # type: ignore[assignment]
+    # Need to monkeypatch async_gateway_devices to return GATEWAY_ONLY too
+    async def fake_gw_devices():
+        return GATEWAY_ONLY
+    coord4.api.async_gateway_devices = fake_gw_devices  # type: ignore[assignment]
+    held2 = await coord4._async_fetch()
+    check("gateway-only details + OHM empty -> cache kept",
+          len(held2) >= 1, f"got {len(held2)}")
+    # The diag_shape on this gateway record must report has_devices=False, device_count=0
+    from custom_components.oblo_living.coordinator import diag_shape
+    shape = diag_shape(GATEWAY_ONLY)
+    check("diag_shape reports has_devices=False for gateway record",
+          shape["has_devices"] is False)
+    check("diag_shape reports device_count=0 for gateway record",
+          shape["device_count"] == 0)
 
     passed = sum(1 for _, ok, _ in CHECKS if ok)
     print(f"\n{passed}/{len(CHECKS)} checks passed")
