@@ -109,4 +109,11 @@ class ObloSwitch(CoordinatorEntity, SwitchEntity):
             raise HomeAssistantError(
                 f"OHM write unconfirmed: gateway reports {res['readback']!r} "
                 f"after {value!r}")
-        # confirmed=True → _poke_device already fired in coordinator
+        # confirmed=True → _poke_device already fired in coordinator. Remember it
+        # too: _poke_device only patches the cached device list, and the next
+        # poll replaces that list wholesale -- so a gateway that omits State from
+        # the poll would drop the confirmed value again and the card would fall
+        # back to Unknown a poll later. That is Andrew's "toggles, then shows
+        # Unknown, nothing in the log": a confirmed write, eroded by the poll.
+        self.coordinator.remember_local_write(
+            did, svc_name, prop, res.get("readback") or value)

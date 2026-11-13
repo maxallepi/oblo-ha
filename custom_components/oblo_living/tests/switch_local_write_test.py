@@ -105,8 +105,11 @@ async def run_tests():
     sw = ObloSwitch(coord, ent)
 
     assert sw.is_on is None, "before any write: is_on is None (Unknown)"
-    await sw.async_turn_on()
-    check("unobservable read-back -> no raise", True)
+    try:
+        await sw.async_turn_on()
+        check("unobservable read-back -> no raise", True)
+    except HomeAssistantError as err:
+        check("unobservable read-back -> no raise", False, str(err))
     check("is_on flips to True via remembered write", sw.is_on is True)
     check("remembered write stored", coord.local_write("1052", "OutletService", "State") == "true")
 
@@ -140,13 +143,16 @@ async def run_tests():
     check("send failure -> raises", raised)
     check("no remembered write after send failure", coord.local_write("1052", "OutletService", "State") is None)
 
-    # 5) Confirmed -> _poke_device updates overlay, no local write
+    # 5) Confirmed -> _poke_device updates overlay AND the write is remembered
     coord = make_coordinator([make_relay_device(1052)], FakeOhm(readbacks=["1"]))
     sw = ObloSwitch(coord, ent)
     await sw.async_turn_on()
     check("confirmed -> no raise", True)
     check("confirmed -> overlay has State (poke)", any("State" in str(v) for v in coord._overlay().values()))
-    check("confirmed -> no local write", coord.local_write("1052", "OutletService", "State") is None)
+    # A confirmed write is remembered too: _poke_device only patches the cache
+    # and the next poll replaces it, which is what eroded the state to Unknown.
+    check("confirmed -> remembered as well",
+          coord.local_write("1052", "OutletService", "State") is not None)
 
     # 6) Reconnect clears remembered -> is_on back to None
     coord = make_coordinator([make_relay_device(1052)], FakeOhm(readbacks=[None]))
@@ -157,7 +163,16 @@ async def run_tests():
     check("after reconnect: local_write gone", coord.local_write("1052", "OutletService", "State") is None)
     check("after reconnect: is_on back to None", sw.is_on is None)
 
-    # 7) Negative control: revert to old raise-on-unconfirmed -> test 1 fails
+    # 7) Confirmed then poll drops State -> remembered write survives
+    coord = make_coordinator([make_relay_device(1052)], FakeOhm(readbacks=["1"]))
+    sw = ObloSwitch(coord, ent)
+    await sw.async_turn_on()  # confirmed=True, readback="1"
+    check("confirmed -> is_on True", sw.is_on is True)
+    # Simulate next poll: gateway omits State entirely
+    coord.devices[0]["services"][0]["props"] = [("DeviceType", "16")]
+    check("poll drops State -> is_on still True (remembered)", sw.is_on is True)
+
+    # 8) Negative control: revert to old raise-on-unconfirmed -> test 1 fails
     # We can't easily swap the implementation here; instead, assert that
     # the current code's path is taken by checking the write succeeded.
     # (The old code would have raised HomeAssistantError on unconfirmed.)
