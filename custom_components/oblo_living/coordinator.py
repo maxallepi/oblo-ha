@@ -138,7 +138,14 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         # still says "online", that flag is cached and the gateway's OMB
         # tunnel is dead -- no client change can fix it.
         # Greppable line: "UPLINK sn=... advanced=... connectionStatus=... lastTimeOnline=... lastTimeStatusUpdated=..."
+        # Throttle: log immediately on transition, or heartbeat every 10 min
+        # (avoids spamming the log with repeated advanced=False while still
+        # capturing every state change: first -> False -> True -> ...)
+        import time
         prev = getattr(self, "_last_status", {})
+        prev_adv = getattr(self, "_last_adv", {})
+        last_log = getattr(self, "_last_uplink_log", 0.0)
+        now = time.time()
         cur = {}
         for gw in (gateways or []):
             if not isinstance(gw, dict):
@@ -152,16 +159,21 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 adv = "True"
             else:
                 adv = "False"
-            _LOGGER.warning(
-                "UPLINK sn=%s advanced=%s connectionStatus=%s lastTimeOnline=%s "
-                "lastTimeStatusUpdated=%s",
-                sn,
-                adv,
-                gw.get("connectionStatus"),
-                gw.get("lastTimeOnline"),
-                ts,
-            )
+            if adv != prev_adv.get(sn) or (now - last_log) >= 600:
+                _LOGGER.warning(
+                    "UPLINK sn=%s advanced=%s connectionStatus=%s lastTimeOnline=%s "
+                    "lastTimeStatusUpdated=%s",
+                    sn,
+                    adv,
+                    gw.get("connectionStatus"),
+                    gw.get("lastTimeOnline"),
+                    ts,
+                )
+                prev_adv[sn] = adv
+                last_log = now
         self._last_status = cur
+        self._last_adv = prev_adv
+        self._last_uplink_log = last_log
 
         # OHM over cloud MQTT is the only source that carries service_list.
         # Failure here must not break the poll -- fall back to REST data and
