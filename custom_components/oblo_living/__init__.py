@@ -193,6 +193,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # groups them under "Connected via OBLO Gateway ...")
     _async_register_gateway_device(hass, entry, coordinator)
 
+    # DeviceInfo is built once, in each entity's __init__ -- so if the gateway
+    # serial is unknown right now (first refresh landed before the gateway
+    # object: OHM down, REST-only, or a 429 on the gateway call) every entity
+    # is created without via_device and the device page renders FLAT. HA
+    # re-resolves via_device on the next restart, so this self-heals then --
+    # but nothing in the log said why, so say it here, once, loudly.
+    if not coordinator.gateway_serial:
+        _LOGGER.warning(
+            "gateway serial unknown after the first refresh: entities will be "
+            "created without via_device and the device page will be FLAT "
+            "until the next restart (integration still works)")
+
     # persist what we learned so a restart does not need a fresh login
     # (OHM needs username+groups; a cached session alone does not carry them)
     saved = {}

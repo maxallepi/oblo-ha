@@ -437,8 +437,9 @@ def device_model(dev_class, service_names):
         return model
 
     # 3) Class itself, unless it's a source marker like "ohm" or "hg"
+    #    or a bare numeric string (looks like an id, not a model name).
     cls = str(dev_class or "").strip()
-    if cls and cls.lower() not in ("ohm", "hg", "sensor", "pir", "relay"):
+    if cls and cls.lower() not in ("ohm", "hg", "sensor", "pir", "relay") and not cls.isdigit():
         return cls
 
     return "OBLO Device"

@@ -305,6 +305,18 @@ check("setup calls it after the first refresh",
       src.index("async_config_entry_first_refresh")
       < src.index("_async_register_gateway_device(hass, entry"))
 
+# Flat-tree diagnosability: DeviceInfo is built once in each entity __init__, so
+# an unknown gateway serial at that moment means no via_device and a flat device
+# page until restart. The warning must exist AND fire before platforms are
+# forwarded -- after the forward it is useless, the entities already exist.
+check("setup warns when gateway serial is unknown",
+      "gateway serial unknown" in src)
+check("flat-tree warning precedes platform forwarding",
+      src.index("gateway serial unknown")
+      < src.index("async_forward_entry_setups"))
+check("flat-tree warning is conditional on a missing serial",
+      "if not coordinator.gateway_serial:" in src)
+
 
 # ----- model / manufacturer resolution (app class table + Z-Wave vendor) -----
 

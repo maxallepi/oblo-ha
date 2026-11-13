@@ -103,6 +103,11 @@ check("real class, no services -> class itself",
 check("source marker 'ohm' -> OBLO Device", device_model("ohm", []) == "OBLO Device")
 check("source marker 'hg' -> OBLO Device", device_model("hg", []) == "OBLO Device")
 check("nothing at all -> OBLO Device", device_model(None, []) == "OBLO Device")
+# Real case from Andrew's ohm.db: object 1044 is type "zone-ctrl" with Class "7".
+# A bare numeric class is an id, not a model; it must not land on the device page.
+check("numeric class '7' -> OBLO Device", device_model("7", []) == "OBLO Device")
+check("numeric class with alarm services -> OBLO Device",
+      device_model("7", ["SafetyAlarmEventService", "ZoneCtrl"]) == "OBLO Device")
 check("power meter alone keeps its label",
       device_model("SENSOR NOTIFICATION", ["power0"]) == "Power Meter")
 check("weather station keeps its label",
