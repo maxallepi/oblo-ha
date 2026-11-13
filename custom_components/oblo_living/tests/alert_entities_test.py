@@ -165,22 +165,31 @@ select = ObloAlertTypeSelect(coord, select_ent)
 check("options = 4 labels", select._attr_options == list(ALERT_TYPE_LABELS))
 check("current_option = 'Warning' (wire '2')", select.current_option == "Warning")
 
-# Confirm write with label readback (mismatched label vs wire -> still confirmed)
+# v0.2.40: the select never reads back (verify=False) -- PropAlertType has no
+# poll row and a read returns the gateway default "0". It sends and remembers.
 coord.ohm = FakeMqtt(readbacks=["WARNING"])
-async def test_select_confirmed_label():
+async def test_select_writes_without_readback():
     await select.async_select_option("Warning")
-check("select write confirmed with label readback",
-      asyncio.run(test_select_confirmed_label()) or True)  # no raise = pass
+check("select write completes without a read-back",
+      asyncio.run(test_select_writes_without_readback()) or True)
+check("select sent PropAlertType '2'",
+      coord.ohm.writes and coord.ohm.writes[0]["property_name"] == "PropAlertType"
+      and coord.ohm.writes[0]["value"] == "2", coord.ohm.writes)
+check("select did not read back", coord.ohm.reads == [], coord.ohm.reads)
+check("select remembered the write",
+      coord.local_write("15", "SimpleAlertService", "PropAlertType") == "2")
+check("current_option follows the remembered write",
+      select.current_option == "Warning")
 
-# Unconfirmed -> raises
-coord.ohm = FakeMqtt(readbacks=["Notification"])
-async def test_select_unconfirmed():
+# A refusal (gateway said no) still raises, because the send itself failed.
+coord.ohm = FakeMqtt(send_error=RuntimeError("broker refused"))
+async def test_select_send_failure():
     try:
         await select.async_select_option("Warning")
         return False
     except HomeAssistantError:
         return True
-check("select unconfirmed -> raises", asyncio.run(test_select_unconfirmed()))
+check("select send failure -> raises", asyncio.run(test_select_send_failure()))
 
 
 # ----- tests: ObloSoundAlertButton ------------------------------------------
@@ -190,8 +199,9 @@ print("\n--- ObloSoundAlertButton ---")
 coord = make_coordinator([{**dev, "services": [svc_with_type]}])
 sound = ObloSoundAlertButton(coord, sound_ent)
 
-# Current type is "Warning" ("2") → ensure type is set, then start, wait, stop
-coord.ohm = FakeMqtt(readbacks=["2", "true", "false"])
+# Current type is "Warning" ("2"). v0.2.40: the type write is not verified, so
+# the scripted read-backs start at the start-write (only 2 reads now).
+coord.ohm = FakeMqtt(readbacks=["true", "false"])
 async def test_sound_confirmed():
     await sound.async_press()
 check("sound press: type + start + stop all confirmed",
@@ -205,7 +215,7 @@ check("third write = PropAlertStartStop 'false'", writes[2]["property_name"] == 
 
 # Unconfirmed start -> raises
 coord = make_coordinator([{**dev, "services": [svc_with_type]}])
-coord.ohm = FakeMqtt(readbacks=["2", "false"])  # start didn't take
+coord.ohm = FakeMqtt(readbacks=["false"])  # start didn't take
 sound2 = ObloSoundAlertButton(coord, sound_ent)
 async def test_sound_unconfirmed():
     try:
@@ -222,6 +232,7 @@ svc_no_type = {
     "props": [("DeviceType", "18")],  # no PropAlertType
 }
 coord = make_coordinator([{**dev, "services": [svc_no_type]}])
+coord.forget_local_writes()   # nothing selected yet in this scenario
 coord.ohm = FakeMqtt(readbacks=["true", "false"])
 sound3 = ObloSoundAlertButton(coord, sound_ent)
 async def test_sound_no_type():
@@ -267,7 +278,8 @@ print("\n--- siren safety ---")
 _saved_sound_s = btn_mod.ALERT_SOUND_S
 btn_mod.ALERT_SOUND_S = 10
 coord = make_coordinator([{**dev, "services": [svc_with_type]}])
-coord.ohm = FakeMqtt(readbacks=["2", "true", "false"])
+# v0.2.40: type write is verify=False, so readbacks start at start (2 reads).
+coord.ohm = FakeMqtt(readbacks=["true", "false"])
 sound4 = ObloSoundAlertButton(coord, sound_ent)
 
 async def test_cancel_mid_wait():

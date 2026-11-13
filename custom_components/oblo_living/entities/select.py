@@ -1,8 +1,10 @@
 """Select entity for OBLO alert type (SimpleAlertService.PropAlertType).
 
 Maps the 4-value enum (Notification/Alarm/Warning/Emergency) to a HA Select.
-Uses loose confirmation with label↔number equivalence because the gateway
-may echo the label ("WARNING") while we write the number ("2").
+PropAlertType is write-only on the gateway: writing it produces no evt, no
+poll row, and any read-back returns the gateway default "'0'". We therefore
+remember what we last wrote and treat it as the current value until the
+gateway itself publishes something different.
 """
 import logging
 
@@ -53,16 +55,31 @@ class ObloAlertTypeSelect(CoordinatorEntity, SelectEntity):
                     return svc
         return None
 
+    def _local_type_wire(self):
+        """Our last write for PropAlertType, if any."""
+        did = self._ent["device_id"]
+        svc_name = self._ent["service"]
+        return self.coordinator.local_write(did, svc_name, "PropAlertType")
+
     @property
     def current_option(self):
         svc = self._service()
-        if svc is None:
-            return None
-        val = read_prop_strict(svc, "PropAlertType")
-        if val is None:
-            return None
-        lbl = alert_type_label(val)
-        return lbl if lbl in self._attr_options else None
+        # 1) If the poll carries it, the gateway spoke — trust the poll.
+        if svc is not None:
+            val = read_prop_strict(svc, "PropAlertType")
+            if val is not None:
+                lbl = alert_type_label(val)
+                if lbl in self._attr_options:
+                    return lbl
+        # 2) Otherwise, if we wrote it and the gateway didn't object, that's
+        #    our honest best truth. We don't raise on mismatch; the UI simply
+        #    shows what we asked for.
+        wire = self._local_type_wire()
+        if wire is not None:
+            lbl = alert_type_label(wire)
+            if lbl in self._attr_options:
+                return lbl
+        return None
 
     @property
     def available(self):
@@ -81,11 +98,12 @@ class ObloAlertTypeSelect(CoordinatorEntity, SelectEntity):
             service_type=svc_type,
             confirm_timeout=OHM_CONFIRM_TIMEOUT_S,
             matcher=lambda s, r: alert_type_label(s) == alert_type_label(r),
+            verify=False,
         )
-        if res.get("confirmed") is False:
-            reason = res.get("error") or "value unchanged"
-            raise HomeAssistantError(f"OHM write unconfirmed: {reason}")
-        if res.get("confirmed") is None:
-            # No read-back on this device class (SimpleAlert has no properties
-            # in OHM). The write was sent; we just can't verify it.
-            _LOGGER.info("OHM write sent, no read-back available: PropAlertType=%s", wire)
+        if res.get("error"):
+            raise HomeAssistantError(f"OHM write failed: {res['error']}")
+        # Remember what we asked for; the gateway will not confirm it.
+        self.coordinator.remember_local_write(did, svc_name, "PropAlertType", wire)
+        # Push immediately so the UI flips without waiting for the next poll.
+        self.coordinator.push_local_update()
+        _LOGGER.info("OHM write sent (not verified): PropAlertType=%s", wire)

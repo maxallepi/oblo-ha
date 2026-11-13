@@ -319,6 +319,49 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             overlay = self._evt_overlay = {}
         return overlay
 
+    # ── locally remembered writes (v0.2.40) ─────────────────────────────
+    # PropAlertType is write-only on the gateway: writing it produces no evt
+    # and no poll row (object 15 has zero property rows in ohm.db), so any
+    # read-back returns the gateway default "'0'" and every idle type write
+    # looks unconfirmed. That is a property of the read, not of the write.
+    # We therefore remember what WE last wrote, per (device, service, prop),
+    # and the Sound button uses that instead of a read-back it cannot win.
+    #
+    # Kept separate from _evt_overlay on purpose: the evt overlay means "the
+    # gateway told us this". This dict means "we asked for this and the
+    # gateway did not object". Conflating them would make a local write look
+    # like gateway truth in _reapply_overlay, which would then keep a stale
+    # local value even after the poll started carrying the real one.
+    def remember_local_write(self, device_id, service_name, prop, value):
+        """Record a value we wrote that the gateway will not read back."""
+        if getattr(self, "_local_writes", None) is None:
+            self._local_writes = {}
+        self._local_writes[(str(device_id), str(service_name), str(prop))] = value
+        return value
+
+    def local_write(self, device_id, service_name, prop):
+        """Last value we wrote for (device, service, prop), or None."""
+        store = getattr(self, "_local_writes", None) or {}
+        return store.get((str(device_id), str(service_name), str(prop)))
+
+    def forget_local_writes(self):
+        """Drop remembered writes. Called on reconnect: new session, new mood."""
+        self._local_writes = {}
+
+    def push_local_update(self):
+        """Push cached data to entities after a local, non-poll change.
+
+        DataUpdateCoordinator always provides async_set_updated_data, but the
+        offline test harness builds this class without HA's base __init__, so
+        the attribute can be absent. Returning False keeps that a no-op rather
+        than an AttributeError in the middle of a write.
+        """
+        notify = getattr(self, "async_set_updated_data", None)
+        if notify is None:
+            return False
+        notify(list(self.data or []))
+        return True
+
     def set_ohm_client(self, client):
         """Attach the cloud MQTT/OHM client (or None to disable)."""
         # A new client means a new session. Anything we learned across the gap
@@ -329,6 +372,10 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug("OBLO evt overlay cleared on reconnect (%d entries)",
                               len(self._overlay()))
             self._evt_overlay = {}
+            # A remembered write belongs to the session that issued it. A new
+            # session may be a restarted gateway with a different stored type,
+            # so not trusting it is the only honest option.
+            self.forget_local_writes()
         self.ohm = client
 
     def set_scan_interval(self, seconds):
@@ -483,7 +530,8 @@ class ObloDataCoordinator(DataUpdateCoordinator):
                                            property_name, value,
                                            service_type=None,
                                            confirm_timeout=2.0,
-                                           matcher=None):
+                                           matcher=None,
+                                           verify=True):
         """Write one property, then confirm it by read-back.
 
         Returns {"sent", "readback", "confirmed", "error"} where `confirmed`
@@ -494,6 +542,12 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         `matcher(sent, readback)` overrides the default loose comparison for
         properties whose wire form and reported form differ (an enum written
         as "2" can be reported back as "WARNING").
+
+        `verify=False` skips the read-back entirely and returns confirmed=None.
+        Use it for properties the gateway does not persist or report back
+        (PropAlertType on SimpleAlertService has no poll row at all): reading
+        them can only return a default, so the "confirmation" would be a lie
+        about the write rather than a measurement of it.
         """
         result = {"sent": value, "readback": None, "confirmed": None,
                   "error": None}
@@ -520,6 +574,15 @@ class ObloDataCoordinator(DataUpdateCoordinator):
             _LOGGER.warning(
                 "OHM write failed device=%s service=%s property=%s: %s",
                 device_id, service_name, property_name, err)
+            return result
+
+        # Verify path: if caller explicitly opts out, the write went out and
+        # we have no business pretending to measure something we were told not
+        # to read. Return None for both confirmed and readback.
+        if not verify:
+            _LOGGER.info(
+                "OHM write sent (not verified): device=%s service=%s property=%s value=%r",
+                device_id, service_name, property_name, value)
             return result
 
         # Read back until it matches or the window closes. A device that

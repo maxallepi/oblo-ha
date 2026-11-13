@@ -205,6 +205,8 @@ print("\n--- select: unverifiable write must not raise ---")
 # @hermes: SimpleAlertService has zero property rows in ohm.db, so every
 # read-back fails and `confirmed` is None. The old `if not confirmed` treated
 # that as a refusal and raised on every single press.
+# v0.2.40: select uses verify=False — it NEVER reads back. Only a send error
+# raises. confirmed is always None, error is None on success.
 from custom_components.oblo_living.entities.select import ObloAlertTypeSelect  # noqa: E402
 
 
@@ -216,6 +218,15 @@ class NullCoordinator:
         self.data = [{"id": "15", "name": "Gateway Simple alert",
                       "services": [{"service": "SimpleAlertService",
                                     "props": {}, "service_type": "SimpleAlertService"}]}]
+
+    def remember_local_write(self, *a, **kw):
+        return None
+
+    def local_write(self, *a, **kw):
+        return None
+
+    def push_local_update(self):
+        return True
 
     async def async_write_service_property(self, *a, **kw):
         return self.result
@@ -236,13 +247,13 @@ async def try_select(result):
         return f"{type(err).__name__}: {err}"
 
 
-check("confirmed=True -> ok", asyncio.run(try_select({"confirmed": True})) == "ok")
-check("confirmed=None (no read-back on this device) -> ok, not an error",
-      asyncio.run(try_select({"confirmed": None, "error": "read-back failed"})) == "ok",
-      asyncio.run(try_select({"confirmed": None, "error": "read-back failed"})))
-raised = asyncio.run(try_select({"confirmed": False, "error": "device said no"}))
-check("confirmed=False (gateway disagrees) -> still raises", raised.startswith("HomeAssistantError"),
-      raised)
+# Success: verify=False returns confirmed=None, error=None
+check("write sent (verify=False) -> ok, confirmed=None",
+      asyncio.run(try_select({"confirmed": None, "error": None})) == "ok")
+# Send failure: verify=False returns error string
+check("send error -> raises HomeAssistantError",
+      asyncio.run(try_select({"confirmed": None, "error": "timeout"})).startswith("HomeAssistantError"),
+      asyncio.run(try_select({"confirmed": None, "error": "timeout"})))
 
 
 print("\n--- SUMMARY ---")

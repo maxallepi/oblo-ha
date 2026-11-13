@@ -80,31 +80,40 @@ class ObloSoundAlertButton(CoordinatorEntity, ButtonEntity):
         gen = self.coordinator.alert_generation(key)
         svc = self._service()
 
-        # 1) Ensure the type is set (write order matters for the siren)
-        cur_type = read_prop_strict(svc, "PropAlertType") if svc else None
+        # 1) Ensure the type is set (write order matters for the siren).
+        #    PropAlertType has no read-back contract: the poll omits it and a
+        #    targeted read returns the gateway default "0". Reading it before
+        #    every press is therefore what silently downgraded every alert to
+        #    NOTIFICATION. Order of trust: the gateway's poll value if it ever
+        #    appears, else the value we last wrote from the select.
         type_wire = None
+        cur_type = read_prop_strict(svc, "PropAlertType") if svc else None
         if cur_type is not None:
             try:
-                type_label = alert_type_label(cur_type)
-                type_wire = alert_type_wire(type_label)
+                type_wire = alert_type_wire(alert_type_label(cur_type))
             except ValueError:
-                # garbage value -> don't guess; the device keeps its own type
+                # garbage value -> fall through to what we remembered
                 _LOGGER.warning(
                     "OBLO alert: unrecognised PropAlertType %r on %s, "
-                    "sounding with the stored type", cur_type, self._attr_name)
+                    "falling back to the last selected type", cur_type,
+                    self._attr_name)
                 type_wire = None
-                type_label = None
-            if type_wire is not None:
-                _LOGGER.debug("OBLO alert: setting type to %s (%s) before sounding",
-                              type_label, type_wire)
-                r = await self.coordinator.async_write_service_property(
-                    did, svc_name, "PropAlertType", type_wire,
-                    service_type=svc_type,
-                    confirm_timeout=OHM_CONFIRM_TIMEOUT_S,
-                    matcher=lambda s, r: alert_type_label(s) == alert_type_label(r),
-                )
-                if r.get("confirmed") is False:
-                    raise HomeAssistantError(f"Alert type write refused: {r.get('error')}")
+        if type_wire is None:
+            type_wire = self.coordinator.local_write(did, svc_name, "PropAlertType")
+        if type_wire is not None:
+            _LOGGER.info("OBLO alert: setting type to %s before sounding", type_wire)
+            r = await self.coordinator.async_write_service_property(
+                did, svc_name, "PropAlertType", type_wire,
+                service_type=svc_type,
+                confirm_timeout=OHM_CONFIRM_TIMEOUT_S,
+                matcher=lambda s, r: alert_type_label(s) == alert_type_label(r),
+                verify=False,
+            )
+            # An unconfirmed read-back is expected here and must never block
+            # the siren; only an actual send/refusal failure does.
+            if r.get("error"):
+                raise HomeAssistantError(f"Alert type write failed: {r['error']}")
+            self.coordinator.remember_local_write(did, svc_name, "PropAlertType", type_wire)
 
         # 2) Start the siren, and make the stop unmissable. If HA reloads or
         # the job is cancelled during the wait, the coroutine is cancelled --
