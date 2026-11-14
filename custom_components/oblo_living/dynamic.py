@@ -67,4 +67,11 @@ def async_setup_dynamic_platform(hass, entry, async_add_entities, platform, fact
             async_add_entities(new)
 
     entry.async_on_unload(coordinator.async_add_listener(_on_refresh))
-    return len(first)
+    # HA's async_forward_entry_setups / entity component calls
+    # `if not await platform.async_setup_entry(...)` and raises
+    # ConfigEntryError on a falsy return (see homeassistant/components/button/
+    # __init__.py). Returning the count was wrong: a platform with zero
+    # entities (e.g. button when no siren is enrolled) returned 0 -> falsy ->
+    # the WHOLE integration entry was torn down, losing every other platform's
+    # entities too. Setup succeeded regardless of count, so return True.
+    return True
