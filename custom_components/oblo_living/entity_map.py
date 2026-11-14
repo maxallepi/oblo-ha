@@ -605,10 +605,17 @@ def device_manufacturer(services):
         if raw is None:
             continue
         try:
-            # Accept decimal "345" or hex "0x0159"
-            mfr_id = int(raw, 0)
+            # The gateway sends ManufacturerID as a bare int (345), not the
+            # string "345" or "0x0159". int(raw, 0) raises
+            # "TypeError: int() can't convert non-string with explicit base" on
+            # that, and a bare `except ValueError` does not catch TypeError --
+            # so build_entities() raised inside every platform's
+            # async_setup_entry and HA tore down the whole config entry with
+            # "Failed to set up the oblo_living button platform".
+            # str keeps decimal/hex support; anything else is already numeric.
+            mfr_id = int(raw, 0) if isinstance(raw, str) else int(raw)
             return ZWAVE_VENDORS.get(mfr_id, MANUFACTURER)
-        except ValueError:
+        except (ValueError, TypeError):
             continue
     return MANUFACTURER
 
