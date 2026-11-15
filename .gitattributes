@@ -1,0 +1,7 @@
+# Keep source archives (GitHub codeload zipball / release tarball) to what a
+# HACS install actually needs. codeload honours export-ignore -- verified
+# empirically against composer/composer's zipball (0 of 326 entries in /tests/).
+/custom_components/oblo_living/tests/ export-ignore
+/scratch/ export-ignore
+/.github/ export-ignore
+/.testrun_* export-ignore

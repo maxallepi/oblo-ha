@@ -1,0 +1,198 @@
+"""Config flow for OBLO Living (cloud mode)."""
+import logging
+from typing import Any, Mapping
+
+import voluptuous as vol
+from homeassistant import config_entries
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+from .const import (
+    DOMAIN, CONF_IDENTITY, CONF_SECRET,
+    CONF_SESSION_ID, CONF_USER_ID,
+    CONF_USERNAME, CONF_GROUPS,
+    CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S,
+    MIN_SCAN_INTERVAL_S, MAX_SCAN_INTERVAL_S,
+)
+from .cloud_api import (
+    ObloCloudApi, ObloAuthError, ObloCloudError, ObloRateLimitError,
+    ObloResponseError,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+_CREDENTIALS = vol.Schema({
+    vol.Required(CONF_IDENTITY): str,
+    vol.Required(CONF_SECRET): str,
+})
+
+
+class ObloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    # v2: stores the PLAINTEXT password. v1 stored md5(password), which the
+    # cloud rejects (it hashes server-side) -- see async_migrate_entry below.
+    VERSION = 2
+
+    def __init__(self):
+        self._entry = None
+
+    @staticmethod
+    def async_get_options_flow(config_entry):
+        """Hand HA the options flow (Configure button on the integration card)."""
+        return ObloOptionsFlow()
+
+    # ---------------------------------------------------------------- helpers
+    async def _async_login(self, identity: str, secret: str):
+        """Log in with PLAINTEXT credentials; return the authenticated api.
+
+        The cloud expects the password verbatim in the POST body and hashes it
+        server-side, so the plaintext is both what goes on the wire and what we
+        persist (a stored hash cannot be replayed -- the server would hash it
+        again and answer 00012).
+        """
+        session = async_get_clientsession(self.hass)
+        api = ObloCloudApi(session, identity, secret)
+        await api.async_login()
+        return api
+
+    def _login_error_key(self, err: Exception) -> str:
+        """Map a cloud exception onto a strings.json error key."""
+        if isinstance(err, ObloAuthError):
+            # wrong password (406/00012), unknown user (409/11020),
+            # forced logout (401/000622), session rejected (403/00003)
+            _LOGGER.info("login rejected: %s", err)
+            return "invalid_auth"
+        if isinstance(err, ObloRateLimitError):
+            # the ACCOUNT is temporarily blocked: even a correct password fails
+            # until the block lifts. Must be checked before ObloCloudError.
+            _LOGGER.warning("cloud account temporarily blocked: %s", err)
+            return "rate_limited"
+        if isinstance(err, ObloResponseError):
+            # reached the cloud, but 5xx / unparseable answer
+            _LOGGER.warning("cloud answered unexpectedly: %s", err)
+            return "cloud_unavailable" if "HTTP 5" in str(err) else "unexpected_response"
+        if isinstance(err, ObloCloudError):
+            # DNS/TLS/refused/timeout - a real network-level failure.
+            # (429/000016 never reaches here: ObloRateLimitError is caught above.)
+            _LOGGER.warning("cloud unreachable: %s", err)
+            return "cannot_connect"
+        _LOGGER.exception("unexpected config flow error: %s", err)
+        return "unknown"
+
+    # ------------------------------------------------------------------- user
+    async def async_step_user(self, user_input: dict[str, Any] | None = None):
+        errors = {}
+        if user_input is not None:
+            # Identity: strip autofill whitespace and normalise case. The cloud
+            # treats " me@x.com" as a different (non-existent) account, which
+            # came back as 11020 "user does not exist" - a false negative.
+            identity = str(user_input[CONF_IDENTITY]).strip()
+            # Password is NEVER stripped: leading/trailing spaces can be real.
+            secret = str(user_input[CONF_SECRET])
+            if not identity or not secret:
+                errors["base"] = "missing_credentials"
+            else:
+                try:
+                    api = await self._async_login(identity, secret)
+                    # success -> create entry with identity + PLAINTEXT password
+                    # session_id/user_id cached for fast startup
+                    return self.async_create_entry(
+                        title=f"OBLO Cloud ({identity})",
+                        data={
+                            CONF_IDENTITY: identity,
+                            CONF_SECRET: secret,
+                            CONF_SESSION_ID: api.session_id,
+                            CONF_USER_ID: api.user_id,
+                            CONF_USERNAME: api.username,
+                            CONF_GROUPS: list(api.groups or []),
+                        },
+                    )
+                except Exception as err:  # noqa: BLE001 - mapped below
+                    errors["base"] = self._login_error_key(err)
+
+        return self.async_show_form(
+            step_id="user", data_schema=_CREDENTIALS, errors=errors)
+
+    # ------------------------------------------------------------------ reauth
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]):
+        """Entry points here when HA decides the credentials need renewing.
+
+        v1 entries stored only md5(password); v2 stores the plaintext. Either
+        way the user is prompted for the password again, which is also the
+        correct recovery path for a v1 entry (a hash is not recoverable).
+        """
+        self._entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"])
+        assert self._entry is not None, "reauth started for an unknown entry"
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+            self, user_input: dict[str, Any] | None = None):
+        errors = {}
+        assert self._entry is not None
+        identity = str(self._entry.data[CONF_IDENTITY]).strip()
+
+        if user_input is not None:
+            secret = str(user_input[CONF_SECRET])
+            if not secret:
+                errors["base"] = "missing_credentials"
+            else:
+                try:
+                    api = await self._async_login(identity, secret)
+                except Exception as err:  # noqa: BLE001 - mapped below
+                    errors["base"] = self._login_error_key(err)
+                else:
+                    new_data = dict(self._entry.data)
+                    new_data.update({
+                        CONF_SECRET: secret,
+                        CONF_SESSION_ID: api.session_id,
+                        CONF_USER_ID: api.user_id,
+                    })
+                    self.hass.config_entries.async_update_entry(
+                        self._entry, data=new_data)
+                    return self.async_abort(reason="reauth_successful")
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({vol.Required(CONF_SECRET): str}),
+            errors=errors,
+            description_placeholders={"identity": identity},
+        )
+
+
+class ObloOptionsFlow(config_entries.OptionsFlow):
+    """Options: how often to poll the cloud.
+
+    The poll is a safety net, not the update path -- gateway events patch the
+    cache in milliseconds (v0.2.32). But each poll costs three round trips
+    (list_gateways + gateway_devices REST, then an OHM object_list command),
+    and this cloud already rate-limited us once with 000016/HTTP 429. So the
+    floor is 15 s, not 5 s: 5 s would be ~2,160 requests/hour against an
+    undocumented endpoint.
+    """
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None):
+        if user_input is not None:
+            # HA validates the Range below, so this is already sane; clamp
+            # anyway in case a stored options dict was hand-edited.
+            secs = int(user_input[CONF_SCAN_INTERVAL])
+            secs = max(MIN_SCAN_INTERVAL_S, min(MAX_SCAN_INTERVAL_S, secs))
+            return self.async_create_entry(
+                title="", data={CONF_SCAN_INTERVAL: secs})
+
+        current = self.config_entry.options.get(
+            CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema({
+                vol.Required(CONF_SCAN_INTERVAL, default=current): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=MIN_SCAN_INTERVAL_S, max=MAX_SCAN_INTERVAL_S),
+                ),
+            }),
+            description_placeholders={
+                "default": str(DEFAULT_SCAN_INTERVAL_S),
+                "min": str(MIN_SCAN_INTERVAL_S),
+            },
+        )
+
+
+
