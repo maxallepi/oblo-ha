@@ -7,8 +7,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (DOMAIN, CONF_IDENTITY, CONF_SECRET, CONF_SESSION_ID,
                     CONF_USER_ID, CONF_USERNAME, CONF_GROUPS,
-                    CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S,
-                    SCAN_INTERVAL_S)
+                    CONF_SCAN_INTERVAL, CONF_IGNORED_DEVICES,
+                    DEFAULT_SCAN_INTERVAL_S, SCAN_INTERVAL_S)
 from .cloud_api import ObloCloudApi, ObloCloudError
 from .cloud_mqtt import ObloCloudMqtt
 from .coordinator import ObloDataCoordinator
@@ -186,6 +186,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S)
     coordinator = ObloDataCoordinator(hass, api, scan_interval=scan_interval,
                                       entry_id=entry.entry_id)
+    # Load permanently ignored device ids from options into coordinator
+    ignored = {str(x) for x in (entry.options.get(CONF_IGNORED_DEVICES) or [])}
+    coordinator.ignored_device_ids = ignored
+    if ignored:
+        _LOGGER.info("OBLO ignoring %d device(s) from options: %s",
+                     len(ignored), sorted(ignored))
     await coordinator.async_config_entry_first_refresh()
     _LOGGER.info("cloud session=%s devices=%d", api.session_id, len(coordinator.devices))
 
@@ -262,6 +268,10 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry):
         return
     coord.set_scan_interval(
         entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S))
+    # Keep the ignore list in sync if options were changed outside the
+    # remove_device service (e.g. hand-edited .storage during a restore).
+    coord.ignored_device_ids = {
+        str(x) for x in (entry.options.get(CONF_IGNORED_DEVICES) or [])}
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

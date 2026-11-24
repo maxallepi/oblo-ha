@@ -237,10 +237,12 @@ def alert_type_wire(label):
 
 
 # Services that emit more than one HA entity. Each spec:
-#   platform: "select" | "button"
+#   platform: "sensor" | "select" | "button"
 #   value_prop: property name in OHM model
 #   suffix: appended to device name for the entity ("Alert Type", "Sound Alert")
 #   options: list of UI option strings (for select only)
+#   device_class: HA device class key (e.g. "temperature", "humidity", "wind_speed")
+#   unit: unit string from the cloud ("°C", "%", "m/s", "g/m³", etc.)
 MULTI_ENTITY_MAP = {
     "SimpleAlertService": [
         {
@@ -259,6 +261,54 @@ MULTI_ENTITY_MAP = {
             "value_prop": "PropAlertStartStop",
             "suffix": "Silence",
             "action": "stop",
+        },
+    ],
+    # Weather 113 device: splits into separate typed sensors. require_prop
+    # means "only create this entity when the service really carries that
+    # property" -- a weather feed without pressure must not produce a
+    # permanently-Unknown Pressure row.
+    "WeatherService": [
+        {
+            "platform": "sensor",
+            "value_prop": "Temperature",
+            "suffix": "Temperature",
+            "device_class": "temperature",
+            "unit": "°C",
+            "require_prop": True,
+        },
+        {
+            "platform": "sensor",
+            "value_prop": "Humidity",
+            "suffix": "Humidity",
+            "device_class": "humidity",
+            "unit": "%",
+            "require_prop": True,
+        },
+        {
+            "platform": "sensor",
+            "value_prop": "Pressure",
+            "suffix": "Pressure",
+            "device_class": "pressure",
+            "unit": "hPa",
+            "require_prop": True,
+        },
+        {
+            "platform": "sensor",
+            "value_prop": "Summary",
+            "suffix": "Summary",
+            "device_class": None,
+            "unit": None,
+            "require_prop": True,
+        },
+    ],
+    "WindService": [
+        {
+            "platform": "sensor",
+            "value_prop": "Speed",
+            "suffix": "Wind Speed",
+            "device_class": "wind_speed",
+            "unit": "m/s",
+            "require_prop": True,
         },
     ],
 }
@@ -341,6 +391,11 @@ MULTI_ENTITY_LABELS = {
     "Type": "Alert Type",
     "Sound": "Sound",
     "Silence": "Silence",
+    "Temperature": "Temperature",
+    "Humidity": "Humidity",
+    "Summary": "Summary",
+    "Wind Speed": "Wind Speed",
+    "Pressure": "Pressure",
 }
 
 
@@ -420,6 +475,10 @@ POWER_PROP_CANDIDATES = (
     "Value", "Energy", "InstantaneousPower", "InstantPower",
 )
 POWER_SERVICES = {"power0", "PowerConsumptionService"}
+
+# Services that use strict property reads (no fallbacks) to avoid showing
+# a different property's value when the expected one is absent.
+STRICT_READ_SERVICES = {"WeatherService", "WindService"}
 
 
 # ── Property-name aliases ───────────────────────────────────────────────
@@ -799,14 +858,21 @@ def build_entities(devices):
                 props = dict(svc.get("props") or [])
                 for spec in multi:
                     prop = str(spec.get("value_prop") or "")
+                    # If require_prop=True, skip this spec when the property
+                    # is not actually present on the service (case-insensitive).
+                    if spec.get("require_prop") and prop:
+                        if prop not in props and prop.lower() not in (k.lower() for k in props):
+                            continue
+                    dclass = spec.get("device_class")
+                    unit = spec.get("unit")
                     out.append({
                         "device_id": dev["id"],
                         "class": dev["class"],
                         "name": dev["name"],
                         "service": name,
                         "platform": spec["platform"],
-                        "device_class": None,
-                        "unit": None,
+                        "device_class": dclass,
+                        "unit": unit,
                         "value_prop": prop,
                         "state": props.get(prop),
                         "service_type": svc.get("service_type"),

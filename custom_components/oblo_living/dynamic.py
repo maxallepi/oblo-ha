@@ -23,8 +23,10 @@ _LOGGER = logging.getLogger(__name__)
 
 def _entries_for(coordinator, platform):
     """Mapped entity specs for one platform from the cached device tree."""
+    ignored = getattr(coordinator, "ignored_device_ids", None) or set()
     return [e for e in build_entities(coordinator.data or [])
-            if e.get("platform") == platform]
+            if e.get("platform") == platform
+            and e.get("device_id") not in ignored]
 
 
 def async_setup_dynamic_platform(hass, entry, async_add_entities, platform, factory):

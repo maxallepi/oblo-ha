@@ -60,6 +60,46 @@ set_property:
       selector:
         text:
 
+remove_device:
+  name: Remove OBLO device
+  description: >-
+    Delete a device and all of its entities from Home Assistant. Pass either
+    the HA device id (from the device page URL) or any entity_id that belongs
+    to the device. Set `permanent` to also stop the integration from
+    re-creating the device on the next restart.
+  fields:
+    device_id:
+      name: HA device id
+      description: The Home Assistant device registry id (device page URL).
+      required: false
+      example: 3f9c2a1b8e4d4f6c9a0b1c2d3e4f5a6b
+      selector:
+        text:
+    entity_id:
+      name: Entity
+      description: >-
+        Any entity belonging to the device. Used to resolve the device when
+        you do not have its registry id.
+      required: false
+      example: sensor.living_room_weather_temperature
+      selector:
+        entity:
+    permanent:
+      name: Permanent
+      description: >-
+        Also add the device to the integration's ignore list so it is not
+        re-created after a Home Assistant restart.
+      required: false
+      default: false
+      selector:
+        boolean:
+    entry_id:
+      name: Config entry
+      description: Only needed when more than one OBLO entry is loaded.
+      required: false
+      selector:
+        text:
+
 get_property:
   name: Get OBLO property
   description: >-

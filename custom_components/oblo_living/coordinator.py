@@ -363,6 +363,9 @@ class ObloDataCoordinator(DataUpdateCoordinator):
         # generation so an in-flight Sound press can tell it has been
         # superseded and must not go on to write "true".
         self._alert_generation = {}
+        # Device ids that must never be re-created (set from entry options).
+        # Populated in __init__.py from entry.options[CONF_IGNORED_DEVICES].
+        self.ignored_device_ids = set()
         # (device_id, service_name) -> {property_name: value}. Holds the last
         # value the GATEWAY itself reported for a property (live evt, or the
         # read-back of a confirmed write). The poll rebuilds the device tree

@@ -12,6 +12,7 @@ CONF_USER_ID = "user_id"
 CONF_USERNAME = "username"      # cli/<username> for cloud MQTT
 CONF_GROUPS = "groups"          # ["admin"] -> admin OHM path
 CONF_SCAN_INTERVAL = "scan_interval"
+CONF_IGNORED_DEVICES = "ignored_device_ids"
 DEFAULT_SCAN_INTERVAL_S = 60
 MIN_SCAN_INTERVAL_S = 15
 MAX_SCAN_INTERVAL_S = 3600

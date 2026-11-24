@@ -11,6 +11,8 @@ from homeassistant.const import (
     EntityCategory,
     PERCENTAGE,
     UnitOfPower,
+    UnitOfPressure,
+    UnitOfSpeed,
     UnitOfTemperature,
     LIGHT_LUX,
 )
@@ -18,8 +20,8 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from ..entity_map import (
-    POWER_SERVICES, device_info_fields, entity_category_attr, entity_label_attr,
-    read_prop, read_prop_strict, resolve_power_prop,
+    POWER_SERVICES, STRICT_READ_SERVICES, device_info_fields, entity_category_attr,
+    entity_label_attr, read_prop, read_prop_strict, resolve_power_prop,
 )
 from ..entity_map import props_as_map
 
@@ -33,6 +35,8 @@ DEVICE_CLASS = {
     "illuminance": SensorDeviceClass.ILLUMINANCE,
     "battery": SensorDeviceClass.BATTERY,
     "power": SensorDeviceClass.POWER,
+    "wind_speed": SensorDeviceClass.WIND_SPEED,
+    "pressure": SensorDeviceClass.PRESSURE,
 }
 
 # textual units from the cloud -> HA units
@@ -41,6 +45,11 @@ UNIT_MAP = {
     "°C": UnitOfTemperature.CELSIUS,
     "W": UnitOfPower.WATT,
     "lx": LIGHT_LUX,
+    "m/s": UnitOfSpeed.METERS_PER_SECOND,
+    "hPa": UnitOfPressure.HPA,
+    # absolute humidity has no HA device class; pass the raw unit through
+    "g/m³": "g/m³",
+    "g/m3": "g/m³",
 }
 
 
@@ -99,7 +108,10 @@ class ObloSensor(CoordinatorEntity, SensorEntity):
             # return a flag or a DeviceType and display it as watts. A power
             # sensor showing 16 W when nobody measured anything is the lie we
             # refuse -- Unknown is the honest answer.
-            if service_name in POWER_SERVICES:
+            # WeatherService/WindService also use strict reads to avoid
+            # falling back to the first property (e.g. Temperature) when the
+            # specific property (Humidity, Summary, Speed) is missing.
+            if service_name in POWER_SERVICES or service_name in STRICT_READ_SERVICES:
                 val = read_prop_strict(svc, value_prop)
             else:
                 val = read_prop(svc, value_prop)
