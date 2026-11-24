@@ -12,7 +12,7 @@ from .const import (DOMAIN, CONF_IDENTITY, CONF_SECRET, CONF_SESSION_ID,
 from .cloud_api import ObloCloudApi, ObloCloudError
 from .cloud_mqtt import ObloCloudMqtt
 from .coordinator import ObloDataCoordinator
-from .entity_map import gateway_identifier, MANUFACTURER
+from .entity_map import gateway_identifier, MANUFACTURER, ohm_id_from_identifier
 from .hub import ObloHub
 from .services import async_register_services
 
@@ -272,6 +272,41 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry):
     # remove_device service (e.g. hand-edited .storage during a restore).
     coord.ignored_device_ids = {
         str(x) for x in (entry.options.get(CONF_IGNORED_DEVICES) or [])}
+
+
+async def async_remove_config_entry_device(
+        hass: HomeAssistant, entry: ConfigEntry, device_entry) -> bool:
+    """Let HA delete one of our devices from the device page.
+
+    Home Assistant only offers "Delete" in a device's menu when the
+    integration implements this hook -- without it the UI can only
+    enable/disable the device. Returning True drops the device and its
+    entities; the cloud device id is added to the entry's ignore list so the
+    next poll does not silently re-create it (which would make Delete look
+    like it did nothing).
+    """
+    cloud_id = None
+    for domain, ident in (device_entry.identifiers or set()):
+        if domain == DOMAIN:
+            cloud_id = ohm_id_from_identifier(entry.entry_id, ident)
+            break
+
+    if cloud_id:
+        ignored = {str(x) for x in (entry.options.get(CONF_IGNORED_DEVICES) or [])}
+        ignored.add(cloud_id)
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options,
+                            CONF_IGNORED_DEVICES: sorted(ignored)})
+        data = hass.data.get(DOMAIN, {}).get(entry.entry_id) or {}
+        coord = data.get("coordinator")
+        if coord is not None:
+            coord.ignored_device_ids.add(cloud_id)
+        _LOGGER.info("OBLO: device %s (%s) deleted from HA and ignored",
+                     device_entry.id, cloud_id)
+    else:
+        _LOGGER.info("OBLO: device %s deleted from HA (no OBLO identifier)",
+                     device_entry.id)
+    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

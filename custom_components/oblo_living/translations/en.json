@@ -91,15 +91,38 @@
           "description": "Only needed when more than one OBLO entry is loaded."
         }
       }
+    },
+    "remove_device": {
+      "name": "Remove OBLO device",
+      "description": "Delete a device and all of its entities from Home Assistant. Pass either the HA device id or any entity_id that belongs to the device. Set `permanent` to also keep the integration from re-creating it after a restart.",
+      "fields": {
+        "device_id": {
+          "name": "HA device id",
+          "description": "The Home Assistant device registry id (visible in the device page URL)."
+        },
+        "entity_id": {
+          "name": "Entity",
+          "description": "Any entity belonging to the device, used when you do not have its registry id."
+        },
+        "permanent": {
+          "name": "Permanent",
+          "description": "Add the device to the ignore list so it is not re-created after a restart."
+        },
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Only needed when more than one OBLO entry is loaded."
+        }
+      }
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "OBLO Living options",
-        "description": "How often Home Assistant polls the OBLO cloud. Default {default} s, minimum {min} s. Live device changes arrive through the gateway event stream within milliseconds, so the poll only exists to catch missed events - a longer interval is gentler on the cloud API (each poll is three cloud round-trips).",
+        "description": "How often Home Assistant polls the OBLO cloud. Default {default} s, minimum {min} s. Live device changes arrive through the gateway event stream within milliseconds, so the poll only exists to catch missed events - a longer interval is gentler on the cloud API (each poll is three cloud round-trips).\n\nHidden device IDs lists cloud devices deleted from Home Assistant; they are never re-created. Clear an id and save to bring that device back.",
         "data": {
-          "scan_interval": "Poll interval (seconds)"
+          "scan_interval": "Poll interval (seconds)",
+          "ignored_device_ids": "Hidden device IDs (comma separated)"
         }
       }
     }

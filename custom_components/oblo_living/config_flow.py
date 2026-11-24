@@ -10,7 +10,7 @@ from .const import (
     DOMAIN, CONF_IDENTITY, CONF_SECRET,
     CONF_SESSION_ID, CONF_USER_ID,
     CONF_USERNAME, CONF_GROUPS,
-    CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S,
+    CONF_SCAN_INTERVAL, CONF_IGNORED_DEVICES, DEFAULT_SCAN_INTERVAL_S,
     MIN_SCAN_INTERVAL_S, MAX_SCAN_INTERVAL_S,
 )
 from .cloud_api import (
@@ -175,11 +175,25 @@ class ObloOptionsFlow(config_entries.OptionsFlow):
             # anyway in case a stored options dict was hand-edited.
             secs = int(user_input[CONF_SCAN_INTERVAL])
             secs = max(MIN_SCAN_INTERVAL_S, min(MAX_SCAN_INTERVAL_S, secs))
-            return self.async_create_entry(
-                title="", data={CONF_SCAN_INTERVAL: secs})
+            raw = str(user_input.get(CONF_IGNORED_DEVICES) or "")
+            ids = sorted({p.strip() for p in raw.replace(",", "\n").splitlines()
+                          if p.strip()})
+            old = {str(x) for x in (self.config_entry.options.get(
+                CONF_IGNORED_DEVICES) or [])}
+            new_opts = {**self.config_entry.options,
+                        CONF_SCAN_INTERVAL: secs,
+                        CONF_IGNORED_DEVICES: ids}
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, options=new_opts)
+            if set(ids) != old:
+                self.hass.config_entries.async_schedule_reload(
+                    self.config_entry.entry_id)
+            return self.async_create_entry(title="", data=new_opts)
 
         current = self.config_entry.options.get(
             CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_S)
+        ignored = sorted({str(x) for x in (self.config_entry.options.get(
+            CONF_IGNORED_DEVICES) or [])})
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
@@ -187,6 +201,8 @@ class ObloOptionsFlow(config_entries.OptionsFlow):
                     vol.Coerce(int),
                     vol.Range(min=MIN_SCAN_INTERVAL_S, max=MAX_SCAN_INTERVAL_S),
                 ),
+                vol.Optional(CONF_IGNORED_DEVICES,
+                             default=", ".join(ignored)): str,
             }),
             description_placeholders={
                 "default": str(DEFAULT_SCAN_INTERVAL_S),
